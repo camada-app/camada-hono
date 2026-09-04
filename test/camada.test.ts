@@ -33,6 +33,7 @@ function frame(): ArrayBuffer {
 let events: Array<Record<string, unknown>>;
 let sdkHeaders: string[];
 let snapshotVersions: string[];
+let tenantTokens: string[];   // the x-tenant each batch shipped under
 
 const fetchImpl: typeof fetch = (async (url: string | URL | Request, init?: RequestInit) => {
   const u = String(url);
@@ -41,6 +42,7 @@ const fetchImpl: typeof fetch = (async (url: string | URL | Request, init?: Requ
     return new Response(frame(), { status: 200, headers: { etag: '"fixture-v4-basic"', 'x-camada-config': JSON.stringify(CONFIG) } });
   }
   sdkHeaders.push(new Headers(init?.headers).get('x-camada-sdk') ?? '');
+  tenantTokens.push(new Headers(init?.headers).get('x-tenant') ?? '');
   events.push(...(JSON.parse(String(init?.body)) as Array<Record<string, unknown>>));
   return new Response(null, { status: 202 });
 }) as typeof fetch;
@@ -63,23 +65,20 @@ function executionCtx(): { ctx: never; settle: () => Promise<unknown> } {
   return { ctx: ctx as never, settle: () => Promise.all(waits) };
 }
 
-/** Drives one request and settles whatever the middleware handed to waitUntil. */
-async function call(a: Hono, path: string, init: RequestInit = {}): Promise<Response> {
-  const { ctx, settle } = executionCtx();
-  const res = await a.request(path, init, {}, ctx);
-  await settle();
-  return res;
-}
-
-/** Drives a raw Request so the test can attach the `cf` properties Workers would. */
-async function callWithCf(a: Hono, cf: Record<string, unknown>, headers: Record<string, string>): Promise<Response> {
-  const req = new Request('http://app.test/', { headers });
-  Object.defineProperty(req, 'cf', { value: cf });
+/** Drives one request as Workers would deliver it — `request.cf` present, which is what makes
+ *  `cf-connecting-ip` trustworthy. `cf: null` drives the same request on a non-Workers runtime. */
+async function call(a: Hono, path: string, init: RequestInit = {}, cf: Record<string, unknown> | null = {}): Promise<Response> {
+  const req = new Request(`http://app.test${path}`, init);
+  if (cf) Object.defineProperty(req, 'cf', { value: cf });
   const { ctx, settle } = executionCtx();
   const res = await a.fetch(req, {}, ctx);
   await settle();
   return res;
 }
+
+/** Drives a raw Request with the `cf` properties Workers would attach. */
+const callWithCf = (a: Hono, cf: Record<string, unknown>, headers: Record<string, string>): Promise<Response> =>
+  call(a, '/', { headers }, cf);
 
 /** Posts a challenge solution the way the proof-of-work page does. */
 function postSolution(a: Hono, ip: string, body: string): Promise<Response> {
@@ -104,7 +103,7 @@ const solve = (nonce: string): string => {
   for (let n = 0; ; n++) if (createHash('sha256').update(`${nonce}.${n}`).digest('hex').startsWith('0000')) return String(n);
 };
 
-beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; resetCamada(); });
+beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; tenantTokens = []; resetCamada(); });
 
 describe('capture', () => {
   it('lets an unlisted request through and ships the event with the real status', async () => {
@@ -198,6 +197,12 @@ describe('challenge', () => {
     expect(await res.json()).toEqual({ error: 'challenge_required' });
   });
 
+  it('refuses an oversized verify body instead of buffering it', async () => {
+    const a = await primed();
+    const res = await postSolution(a, CHALLENGED_IP, `nonce=x&solution=1&to=%2F&pad=${'a'.repeat(5000)}`);
+    expect(res.status).toBe(413);
+  });
+
   it('rejects a forged nonce and sets no cookie', async () => {
     const a = await primed();
     const forged = 'a'.repeat(32);
@@ -224,6 +229,78 @@ describe('challenge', () => {
   it('does nothing when challenge: false', async () => {
     const a = await primed({ challenge: false });
     expect((await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, ...HTML } })).status).toBe(200);
+  });
+});
+
+describe('trusting the client address', () => {
+  it('ignores cf-connecting-ip off Workers, where any client can forge it', async () => {
+    const a = await primed();
+    // Same header, same blocked ip — but no `request.cf`, so this is node-server/Bun/Deno and
+    // the header is attacker-controlled. Honouring it would be blocklist evasion, and would let
+    // an attacker mint a `_cch` bound to any address they name.
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } }, null);
+    expect(res.status).toBe(200);
+  });
+
+  it('still honours a trusted-proxy XFF off Workers', async () => {
+    resetCamada();
+    const a = new Hono();
+    a.use('*', camada({ env: { ...ENV, CAMADA_TRUSTED_PROXY: 'hops:1' }, fetchImpl }));
+    a.get('/', (c) => c.text('home'));
+    await call(a, '/', {}, null);
+    await call(a, '/', {}, null);
+    const res = await call(a, '/', { headers: { 'x-forwarded-for': BLOCKED_IP } }, null);
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('per-configuration engines', () => {
+  it('never lends one tenant\'s snapshot or ingest token to another mount', async () => {
+    resetCamada();
+    const other = { ...ENV, CAMADA_KEY: 'tok-other.snap-other' };
+    const a = new Hono();
+    a.use('*', camada({ env: ENV, fetchImpl }));
+    a.get('/', (c) => c.text('a'));
+    const b = new Hono();
+    b.use('*', camada({ env: other, fetchImpl }));
+    b.get('/', (c) => c.text('b'));
+
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    await call(b, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    await call(b, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(tenantTokens).toContain('tok-acme');
+    expect(tenantTokens).toContain('tok-other');   // app B must not ship under tenant A's token
+  });
+
+  it('does not go permanently inert after one unconfigured request', async () => {
+    resetCamada();
+    let env: Record<string, string | undefined> = {};
+    const a = new Hono();
+    a.use('*', camada({ get env() { return env; }, fetchImpl } as never));
+    a.get('/', (c) => c.text('home'));
+    await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } });   // no key: inert
+    env = ENV;
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });    // keyed now: must wake up
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } });
+    expect(res.status).toBe(403);
+  });
+});
+
+describe('session', () => {
+  it('mints the shared _sfp cookie so sid and ns are real at this tap', async () => {
+    const a = await primed();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(res.headers.get('set-cookie')).toContain('_sfp=');
+    expect(res.headers.get('set-cookie')).toContain('HttpOnly');
+  });
+
+  it('never overwrites an existing session', async () => {
+    const a = await primed();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=known-sid' } });
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(events.at(-1)).toMatchObject({ sid: 'known-sid' });
   });
 });
 
