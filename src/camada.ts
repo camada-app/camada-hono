@@ -8,7 +8,7 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync,
-  createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
+  guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
   CHALLENGE_COOKIE, TAP_HONO, type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
@@ -16,6 +16,8 @@ import { SDK_ID } from './version.js';
 
 const DEFAULT_CHALLENGE_PATH = '/__camada/challenge';
 const SESSION_COOKIE = '_sfp';   // the same session cookie as every other tap: sid/ns stay comparable
+const SESSION_MAX_AGE = 2592000;
+const BODY_MAX = 4 * 1024;       // the verify form is ~120 bytes; anything larger is not ours
 
 interface Engine {
   env: ResolvedEnv;
@@ -26,24 +28,29 @@ interface Engine {
 
 type WaitUntil = (p: Promise<unknown>) => void;
 
-let engine: Engine | null | undefined;   // undefined = not built yet; null = unconfigured
+// One engine per resolved configuration, not per module: a Workers isolate can host several
+// Hono apps, and a shared singleton would enforce the first tenant's snapshot on the second
+// and sign its `_cch` cookies with the first tenant's secret. An unconfigured request is never
+// cached — a warm-up or a differently-keyed mount must not leave the isolate inert for good.
+const engines = new Map<string, Engine>();
 
-/** Test/reset hook: drops the cached engine. */
+/** Test/reset hook: drops every cached engine. */
 export function resetCamada(): void {
-  engine?.snap.stop();
-  engine?.queue.stop();
-  engine = undefined;
+  for (const e of engines.values()) { e.snap.stop(); e.queue.stop(); }
+  engines.clear();
 }
 
 function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefined>): Engine | null {
-  if (engine !== undefined) return engine;
   const env = resolveEnv(opts, ctxEnv);
   if (!env) {
     logRateLimited(new Error('CAMADA_KEY not set — camada is inactive'));
-    return (engine = null);
+    return null;
   }
+  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${opts.snapshotVersion ?? 4}`;
+  const cached = engines.get(id);
+  if (cached) return cached;
   const injected = opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {};   // never pass an explicit undefined key
-  engine = {
+  const engine: Engine = {
     env,
     snap: new SnapshotClient({
       url: env.snapshotUrl, token: env.snapToken, mode: 'lazy', sdk: SDK_ID,
@@ -52,6 +59,7 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     queue: new EventQueue({ url: env.ingestUrl, token: env.ingestToken, sdk: SDK_ID, ...injected }),
     kit: createChallengeAsync({ secret: env.secret }),
   };
+  engines.set(id, engine);
   return engine;
 }
 
@@ -70,9 +78,15 @@ const cfOf = (req: Request): CfProps => ((req as Request & { cf?: CfProps }).cf 
 const trustedProxy = (e: Engine): TrustedProxyConfig | null =>
   e.env.trustedProxy ?? e.snap.config?.trusted_proxy ?? null;
 
-/** Cloudflare hands the real client address directly; XFF is only the fallback. */
-const clientIp = (e: Engine, req: Request): string | null =>
-  req.headers.get('cf-connecting-ip') || resolveClientIp(null, req.headers.get('x-forwarded-for'), trustedProxy(e));
+/** Cloudflare sets `cf-connecting-ip` itself and a client cannot forge it — but only on
+ *  Workers, which is also the only place `request.cf` exists. On any other Hono runtime
+ *  (node-server, Bun, Deno) that header is attacker-controlled, so it is ignored there and the
+ *  trusted-proxy rules decide, exactly as they do for X-Forwarded-For. */
+const clientIp = (e: Engine, req: Request): string | null => {
+  const cf = (req as Request & { cf?: unknown }).cf;
+  const direct = cf ? req.headers.get('cf-connecting-ip') : null;
+  return direct || resolveClientIp(null, req.headers.get('x-forwarded-for'), trustedProxy(e));
+};
 
 interface RequestFacts {
   url: URL;
@@ -114,14 +128,16 @@ function ship(e: Engine, ev: WireEvent, waitUntil: WaitUntil): void {
 }
 
 export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
-  const challengeOn = opts.challenge !== false;
   const challengePath = opts.challengePath ?? DEFAULT_CHALLENGE_PATH;
 
   return async function camadaHono(c: Context, next: Next): Promise<Response | void> {
-    const env = { ...(c.env as Record<string, string | undefined> | undefined), ...opts.env };
-    if (env.CAMADA_DISABLED === '1') return next();
-    const eng = ensure(opts, env);
+    // Reading c.env and building the engine are inside the guard too: a Workers env carries
+    // non-string bindings, and a throw here would 5xx the app on its very first request.
+    const env = guarded(() => ({ ...(c.env as Record<string, string | undefined> | undefined), ...opts.env }), {} as Record<string, string | undefined>);
+    const eng = guarded(() => (env.CAMADA_DISABLED === '1' ? null : ensure(opts, env)), null);
     if (!eng) return next();
+    // Same opt-out as @camada/next: the code option, or CAMADA_CHALLENGE=0 in the Worker env.
+    const challengeOn = opts.challenge !== false && env.CAMADA_CHALLENGE !== '0';
 
     const waitUntil: WaitUntil = (p) => {
       try { c.executionCtx?.waitUntil(p); } catch { /* no execution context outside a fetch handler */ }
@@ -166,6 +182,15 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
 
     await next();
 
+    // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
+    // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one.
+    guarded(() => {
+      const req = c.req.raw;
+      if (cookieValue(req.headers.get('cookie') || '', SESSION_COOKIE)) return;
+      const secure = new URL(req.url).protocol === 'https:' ? '; Secure' : '';
+      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${crypto.randomUUID()}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
+    }, undefined);
+
     // The response has settled, so this tap ships the real status — unlike @camada/next's
     // middleware position, which can only report pre-response.
     void guardedAsync(async () => {
@@ -205,7 +230,12 @@ async function serve(eng: Engine, req: Request, ip: string, sid: string | null, 
 /** POST from the page: validate, set `_cch`, 302 back, ship `{ st: 200, ch: 1 }`. */
 async function verify(eng: Engine, req: Request, ip: string, sid: string | null, action: string, waitUntil: WaitUntil): Promise<Response> {
   const url = new URL(req.url);
-  const form = parseFormBody(await req.text());
+  // camada answers this path before the app runs, so it must not become a place to post
+  // hundreds of megabytes at an unauthenticated endpoint.
+  if (Number(req.headers.get('content-length')) > BODY_MAX) return new Response(null, { status: 413 });
+  const body = await req.text();
+  if (body.length > BODY_MAX) return new Response(null, { status: 413 });
+  const form = parseFormBody(body);
   const to = safeReturnTo(form.to);
   const now = Date.now();
   if (!(await eng.kit.verify(ip, now, form.nonce, form.solution))) {
