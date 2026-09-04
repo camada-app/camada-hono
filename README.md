@@ -47,9 +47,10 @@ const OPEN = new Set(['/api/health', '/api/stripe/webhook']);
 app.use('/api/*', (c, next) => (OPEN.has(c.req.path) ? next() : guard(c, next)));
 ```
 
-Call `camada()` once and reuse the handler: the engine (snapshot poller, event queue, challenge
-keys) is a module singleton built on the first request, so a second `camada()` with different
-options would not get a second engine.
+Call `camada()` once and reuse the handler. Engines are cached per resolved configuration, so
+mounting the same config twice shares one snapshot poller and one event queue, while two mounts
+with different keys or URLs each get their own — a Workers isolate hosting several Hono apps
+never enforces one tenant's snapshot on another, nor signs its cookies with another's secret.
 
 Without `CAMADA_KEY` the middleware is inert (one log line, no requests, no enforcement), so an
 unprovisioned environment behaves exactly as if camada were not installed.
@@ -60,7 +61,11 @@ unprovisioned environment behaves exactly as if camada were not installed.
    edge runtime). Every poll and event batch carries `x-camada-sdk: @camada/hono/<version>`,
    and polls ask for snapshot v4 (`x-camada-snapshot: 4`).
 2. Resolves the client from `cf-connecting-ip`, falling back to `X-Forwarded-For` under your
-   tenant's trusted-proxy config. Raw `X-Forwarded-For` is never trusted without one.
+   tenant's trusted-proxy config. Neither header is ever trusted blindly: `cf-connecting-ip`
+   counts only on Workers (where Cloudflare sets it and a client cannot forge it, and where
+   `request.cf` proves it), and `X-Forwarded-For` counts only under a trusted-proxy config. On
+   `@hono/node-server`, Bun or Deno the CF header is ignored — there it is just another header
+   the caller controls.
 3. **Block** → `403` with `x-block-reason` before your handler; the event still ships, with
    `st: 403` and `blk: <reason>` so the analyst counts SDK blocks apart from your own 403s.
 4. **Allow** → the v4 allow list wins over a wider block (an allow-listed IP inside a blocked
@@ -97,6 +102,8 @@ never challenged (it would mint a cookie any other unidentified client could pre
 | `challengePath` | `/__camada/challenge` | where that page posts its solution |
 | `snapshotVersion` | `4` | `3` opts out of the v4 allow/challenge sections |
 | `env` | `c.env` | overrides the Worker env (tests) |
+
+`CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
 
 `CAMADA_DISABLED=1` in the Worker env switches everything off, checked per request.
 
