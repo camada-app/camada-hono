@@ -1,4 +1,4 @@
-// @camada/hono against the golden v4 snapshot, driven through a real Hono app with
+// @camada/hono against the golden v4 and v5 snapshots, driven through a real Hono app with
 // app.request(). The fixtures are read through the file: symlink to @camada/core, so this
 // package is pinned to the same bytes edge-analyst generates.
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -10,23 +10,38 @@ import { CHALLENGE_COOKIE } from '@camada/core';
 import { camada, resetCamada, type CamadaHonoOptions } from '../src/index.js';
 
 const FIX = fileURLToPath(new URL('../node_modules/@camada/core/test/fixtures/blk3/', import.meta.url));
-const BIN = readFileSync(FIX + 'v4-basic.bin');
-const META = JSON.stringify(JSON.parse(readFileSync(FIX + 'v4-basic.meta.json', 'utf8')));
+const FIX5 = fileURLToPath(new URL('../node_modules/@camada/core/test/fixtures/blk5/', import.meta.url));
+const container = (dir: string, name: string) => ({
+  bin: readFileSync(dir + name + '.bin'),
+  meta: JSON.stringify(JSON.parse(readFileSync(dir + name + '.meta.json', 'utf8'))),
+});
+const V4 = container(FIX, 'v4-basic');
+const V5 = container(FIX5, 'v5-rules');
+// Which container this tenant published. §D3: the client always asks for the newest it can
+// read and the server answers with what it has, so the two are set independently here.
+let served = V4;
 
 const BLOCKED_IP = '203.0.113.66';     // block side
 const CHALLENGED_IP = '192.0.2.20';    // challenge side only
 const ALLOWED_IP = '10.0.0.7';         // allow-listed inside the blocked 10.0.0.0/8
 const HTML = { accept: 'text/html', 'sec-fetch-dest': 'document' };
+// v5-rules only: the ordered custom rules the golden container carries.
+const RULE_BLOCKED_IP = '198.51.100.7';   // builtin:block, a manual-block entry
+const SKIP_PATH = '/healthz';             // cr_00000000000a, skip — beats every side
+const WARN_UA = 'Scrapy/2.11 (+https://scrapy.org)';   // cr_00000000000e, warn
+const BLOCKED_UA = 'curl/8.4.0';                       // cr_00000000000f, block
+const BLOCKED_HEADER = 'x-api-key';                    // cr_000000000019, `header is` → block
+const BLOCKED_HEADER_VALUE = 'leaked-key-1';
 
 const CONFIG = { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 };
 const ENV = { CAMADA_KEY: 'tok-acme.snap-acme', CAMADA_INGEST_URL: 'http://analyst.test', CAMADA_SNAPSHOT_URL: 'http://analyst.test/snapshot' };
 
-// 200 body frame: [u32 LE meta-length][meta JSON][BLK3 bin]
+// 200 body frame: [u32 LE meta-length][meta JSON][BLK bin]
 function frame(): ArrayBuffer {
-  const m = new TextEncoder().encode(META);
-  const f = new Uint8Array(4 + m.length + BIN.length);
+  const m = new TextEncoder().encode(served.meta);
+  const f = new Uint8Array(4 + m.length + served.bin.length);
   new DataView(f.buffer).setUint32(0, m.length, true);
-  f.set(m, 4); f.set(new Uint8Array(BIN), 4 + m.length);
+  f.set(m, 4); f.set(new Uint8Array(served.bin), 4 + m.length);
   return f.buffer;
 }
 
@@ -39,7 +54,7 @@ const fetchImpl: typeof fetch = (async (url: string | URL | Request, init?: Requ
   const u = String(url);
   if (u.endsWith('/snapshot')) {
     snapshotVersions.push(new Headers(init?.headers).get('x-camada-snapshot') ?? '');
-    return new Response(frame(), { status: 200, headers: { etag: '"fixture-v4-basic"', 'x-camada-config': JSON.stringify(CONFIG) } });
+    return new Response(frame(), { status: 200, headers: { etag: `"${JSON.parse(served.meta).version}"`, 'x-camada-config': JSON.stringify(CONFIG) } });
   }
   sdkHeaders.push(new Headers(init?.headers).get('x-camada-sdk') ?? '');
   tenantTokens.push(new Headers(init?.headers).get('x-tenant') ?? '');
@@ -54,6 +69,8 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/cart', (c) => c.html('<p>cart</p>'));
   a.get('/checkout', (c) => c.html('<p>checkout</p>'));
   a.get('/admin/users', (c) => c.html('<p>admin</p>'));
+  a.get('/healthz', (c) => c.text('ok'));
+  a.get('/api/v2/dump', (c) => c.text('dump'));
   a.get('/missing-route-is-404', (c) => c.notFound());
   return a;
 }
@@ -98,12 +115,18 @@ async function primed(opts: CamadaHonoOptions = {}): Promise<Hono> {
   return a;
 }
 
+/** The same, against a tenant that publishes the v5 container (the ordered custom rules). */
+async function primedV5(opts: CamadaHonoOptions = {}): Promise<Hono> {
+  served = V5;
+  return primed(opts);
+}
+
 const nonceOf = (page: string) => /name="nonce" value="([0-9a-f]{32})"/.exec(page)![1];
 const solve = (nonce: string): string => {
   for (let n = 0; ; n++) if (createHash('sha256').update(`${nonce}.${n}`).digest('hex').startsWith('0000')) return String(n);
 };
 
-beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; tenantTokens = []; resetCamada(); });
+beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; tenantTokens = []; served = V4; resetCamada(); });
 
 describe('capture', () => {
   it('lets an unlisted request through and ships the event with the real status', async () => {
@@ -113,12 +136,18 @@ describe('capture', () => {
     expect(events.some((e) => e.tap === 'sdk-hono' && e.p === '/' && e.st === 200)).toBe(true);
   });
 
-  it('reports its identity on every batch and asks for the v4 snapshot', async () => {
+  it('reports its identity on every batch and asks for the newest snapshot', async () => {
     const a = await primed();
     await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
-    expect(snapshotVersions[0]).toBe('4');
+    expect(snapshotVersions[0]).toBe('5');   // §D3: this tenant only has v4, and is answered with it
     expect(sdkHeaders.length).toBeGreaterThan(0);
     expect(sdkHeaders.every((h) => /^@camada\/hono\/\d+\.\d+\.\d+$/.test(h))).toBe(true);
+  });
+
+  it('pins the container when the app asks for v4', async () => {
+    const a = await primed({ snapshotVersion: 4 });
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(snapshotVersions[0]).toBe('4');
   });
 
   it('reports the client protocol from request.cf, never a forwarded header', async () => {
@@ -160,6 +189,94 @@ describe('enforcement', () => {
     const res = await callWithCf(a, { asn: 64512 }, { 'cf-connecting-ip': '8.8.8.8', ...HTML });   // the challenge side's asn
     expect(res.status).toBe(403);
     expect(res.headers.get('x-camada-challenge')).toBe('1');
+  });
+});
+
+describe('ordered custom rules (v5)', () => {
+  it('lets a skip rule beat the wider block below it', async () => {
+    const a = await primedV5();
+    expect((await call(a, SKIP_PATH, { headers: { 'cf-connecting-ip': BLOCKED_IP } })).status).toBe(200);
+    expect((await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } })).status).toBe(403);
+  });
+
+  it('lets the built-in Allow-list rule beat the wider block below it', async () => {
+    const a = await primedV5();
+    expect((await call(a, '/', { headers: { 'cf-connecting-ip': ALLOWED_IP } })).status).toBe(200);
+    expect(events.at(-1)!.wrn).toBeUndefined();   // an allowed request is an ordinary request
+  });
+
+  it('blocks by rule with x-block-rule and ships blk rule + rl', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': RULE_BLOCKED_IP } });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-block-reason')).toBe('rule');
+    expect(res.headers.get('x-block-rule')).toBe('builtin:block');
+    expect(res.headers.get('x-block-version')).toBeTruthy();
+    expect(events.some((e) => e.st === 403 && e.blk === 'rule' && e.rl === 'builtin:block')).toBe(true);
+  });
+
+  it('blocks by a user-agent rule — the tap must pass ua through', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', 'user-agent': BLOCKED_UA } });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-block-rule')).toBe('cr_00000000000f');
+  });
+
+  it('blocks by a header rule — the tap must pass a header getter through', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', [BLOCKED_HEADER]: BLOCKED_HEADER_VALUE } });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-block-reason')).toBe('rule');
+    expect(res.headers.get('x-block-rule')).toBe('cr_000000000019');
+    expect(events.some((e) => e.st === 403 && e.blk === 'rule' && e.rl === 'cr_000000000019')).toBe(true);
+  });
+
+  it('matches a header rule however the client spelled the name', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', 'X-API-Key': BLOCKED_HEADER_VALUE } });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-block-rule')).toBe('cr_000000000019');
+  });
+
+  it('passes when the header the rule reads is absent', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(res.status).toBe(200);   // a condition the request cannot answer is false, negatives included
+    const ev = events.at(-1)!;
+    expect(ev.blk).toBeUndefined();
+    expect(ev.rl).toBeUndefined();
+  });
+
+  it('blocks by an asn + country rule, which a bare Node tap cannot judge', async () => {
+    const a = await primedV5();
+    const res = await callWithCf(a, { asn: 64500, country: 'FR' }, { 'cf-connecting-ip': '8.8.8.8' });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-block-rule')).toBe('cr_000000000010');
+  });
+
+  it('serves the challenge page for a challenge rule', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/checkout', { headers: { 'cf-connecting-ip': '8.8.8.8', ...HTML } }, { country: 'DE' });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-camada-challenge')).toBe('1');
+    expect(events.some((e) => e.st === 403 && e.blk === 'challenge')).toBe(true);
+  });
+
+  it('passes a warn rule and stamps wrn on the event', async () => {
+    const a = await primedV5();
+    const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', 'user-agent': WARN_UA } });
+    expect(res.status).toBe(200);
+    const ev = events.at(-1)!;
+    expect(ev.wrn).toBe('cr_00000000000e');
+    expect(ev.blk).toBeUndefined();   // warn is not a block: the traffic passed
+  });
+
+  it('leaves an unmatched request alone', async () => {
+    const a = await primedV5();
+    expect((await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', 'user-agent': 'Mozilla/5.0' } })).status).toBe(200);
+    const ev = events.at(-1)!;
+    expect(ev.wrn).toBeUndefined();
+    expect(ev.rl).toBeUndefined();
   });
 });
 

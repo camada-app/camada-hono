@@ -1,6 +1,6 @@
 // Workers hand env vars per request on `c.env`, not on a process — so the engine is built from
 // whatever the first request carries, merged with the options the app passed in code.
-import { parseKey, parseTrustedProxyEnv, type TrustedProxyConfig } from '@camada/core';
+import { parseKey, parseTrustedProxyEnv, type SnapshotVersion, type TrustedProxyConfig } from '@camada/core';
 
 export interface ResolvedEnv {
   ingestToken: string;
@@ -18,7 +18,7 @@ export interface CamadaHonoOptions {
   trustedProxy?: TrustedProxyConfig | string | null;
   challenge?: boolean;            // enforce `challenge` verdicts with the first-party page (default true)
   challengePath?: string;         // where that page posts its solution (default /__camada/challenge)
-  snapshotVersion?: 3 | 4;        // 3 opts out of the v4 allow/challenge sections
+  snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
   env?: Record<string, string | undefined>;   // overrides c.env (tests, and apps that read config themselves)
   fetchImpl?: typeof fetch;
 }

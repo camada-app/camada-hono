@@ -9,7 +9,8 @@ import type { Context, MiddlewareHandler, Next } from 'hono';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync,
   guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
-  CHALLENGE_COOKIE, TAP_HONO, type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
+  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
+  type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
 import { SDK_ID } from './version.js';
@@ -46,7 +47,8 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     logRateLimited(new Error('CAMADA_KEY not set — camada is inactive'));
     return null;
   }
-  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${opts.snapshotVersion ?? 4}`;
+  const snapshotVersion = opts.snapshotVersion ?? DEFAULT_SNAPSHOT_VERSION;
+  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${snapshotVersion}`;
   const cached = engines.get(id);
   if (cached) return cached;
   const injected = opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {};   // never pass an explicit undefined key
@@ -54,7 +56,7 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     env,
     snap: new SnapshotClient({
       url: env.snapshotUrl, token: env.snapToken, mode: 'lazy', sdk: SDK_ID,
-      snapshotVersion: opts.snapshotVersion ?? 4, ...injected,
+      snapshotVersion, ...injected,
     }),
     queue: new EventQueue({ url: env.ingestUrl, token: env.ingestToken, sdk: SDK_ID, ...injected }),
     kit: createChallengeAsync({ secret: env.secret }),
@@ -143,6 +145,10 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       try { c.executionCtx?.waitUntil(p); } catch { /* no execution context outside a fetch handler */ }
     };
 
+    // The id of the `warn` rule that let this request through, read again after next() when the
+    // response event is built (§D3). Every other action settles before the app ever runs.
+    let warnRule: string | null = null;
+
     const answer = await guardedAsync(async (): Promise<Response | null> => {
       eng.snap.ensureFresh(waitUntil);
 
@@ -150,19 +156,26 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       const { url, path, cf, ip, sid } = describeRequest(eng, req);
 
       const v = eng.snap.verdict({
-        ip, path,
+        ip, path, ua: req.headers.get('user-agent'),   // §D3: without ua every `ua` rule is false
+        // `header` conditions read the request through this getter; `Headers.get` is
+        // case-insensitive, so the lower-cased name the matcher asks with finds whatever
+        // spelling the client sent. Without it every `header` rule is false.
+        header: (n) => req.headers.get(n),
         asn: cf.asn ?? null, country: cf.country ?? null, tlsx: cf.tlsClientExtensionsSha1 ?? null,
       });
+      warnRule = v.warn ? v.rule ?? null : null;
 
       if (v.block) {
         const ev = buildEvent(req, path, url.search, ip, sid);
         ev.st = 403;
-        ev.blk = v.reason;   // SDK-01: the analyst counts SDK blocks apart from the app's own 403s
+        ev.blk = v.reason;   // SDK-01: the analyst counts SDK blocks apart from the app's own 403s ('rule' when a rule decided)
+        if (v.rule) ev.rl = v.rule;
         ship(eng, ev, waitUntil);
-        return new Response('Forbidden', {
-          status: 403,
-          headers: { 'content-type': 'text/plain', 'x-block-reason': String(v.reason ?? ''), 'x-block-version': v.version ?? '' },
-        });
+        const headers: Record<string, string> = {
+          'content-type': 'text/plain', 'x-block-reason': String(v.reason ?? ''), 'x-block-version': v.version ?? '',
+        };
+        if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit
+        return new Response('Forbidden', { status: 403, headers });
       }
 
       // A challenge needs a resolved client ip: the nonce and the `_cch` cookie are bound to it.
@@ -201,6 +214,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       if (Math.random() >= (cfg?.sample ?? 1)) return;
       const ev = buildEvent(req, path, url.search, ip, sid);
       ev.st = c.res.status;
+      if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
       ship(eng, ev, waitUntil);
     }, undefined);
   };
