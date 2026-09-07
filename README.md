@@ -1,9 +1,9 @@
 # @camada/hono
 
 camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant snapshot inline
-(block, allow, challenge), serves a first-party proof-of-work challenge page, and ships wire
-events through `waitUntil` so nothing is on the response path. Fails open by design — a camada
-outage or bug never 5xxes your app.
+(your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
+challenge page, and ships wire events through `waitUntil` so nothing is on the response path.
+Fails open by design — a camada outage or bug never 5xxes your app.
 
 Not yet on npm — consumed via a `file:` dependency from a sibling checkout.
 
@@ -59,21 +59,56 @@ unprovisioned environment behaves exactly as if camada were not installed.
 
 1. Refreshes the snapshot off-path through `waitUntil` (lazy mode — no interval timers on an
    edge runtime). Every poll and event batch carries `x-camada-sdk: @camada/hono/<version>`,
-   and polls ask for snapshot v4 (`x-camada-snapshot: 4`).
+   and polls ask for snapshot v5 (`x-camada-snapshot: 5`) — the container that carries your
+   ordered custom rules.
 2. Resolves the client from `cf-connecting-ip`, falling back to `X-Forwarded-For` under your
    tenant's trusted-proxy config. Neither header is ever trusted blindly: `cf-connecting-ip`
    counts only on Workers (where Cloudflare sets it and a client cannot forge it, and where
    `request.cf` proves it), and `X-Forwarded-For` counts only under a trusted-proxy config. On
    `@hono/node-server`, Bun or Deno the CF header is ignored — there it is just another header
    the caller controls.
-3. **Block** → `403` with `x-block-reason` before your handler; the event still ships, with
+3. Runs your ordered custom rules (see below), then the allow, block and challenge lists.
+4. **Block** → `403` with `x-block-reason` before your handler; the event still ships, with
    `st: 403` and `blk: <reason>` so the analyst counts SDK blocks apart from your own 403s.
-4. **Allow** → the v4 allow list wins over a wider block (an allow-listed IP inside a blocked
-   CIDR or ASN goes through).
-5. **Challenge** → a `403` proof-of-work page (see below).
-6. Otherwise your handler runs, and the settled response ships one batched, redacted event with
+5. **Skip** → a skip rule or the allow list wins over a wider block (an allow-listed IP
+   inside a blocked CIDR or ASN goes through).
+6. **Challenge** → a `403` proof-of-work page (see below).
+7. Otherwise your handler runs, and the settled response ships one batched, redacted event with
    its real status (Authorization and Cookie values never leave the isolate; credential-looking
    query values are scrubbed — see `@camada/core`).
+
+## Custom rules
+
+Your Rules page holds one ordered list per project, and this middleware walks it before the
+allow, block and challenge lists. First match wins — the order *is* the precedence — and each
+rule carries one of four actions:
+
+| action | what the middleware does | on the event |
+|---|---|---|
+| `skip` | passes the request | nothing |
+| `block` | `403` before your handler | `blk: "rule"`, `rl: "<rule id>"` |
+| `challenge` | serves the proof-of-work page (`challenge: false` opts out) | `blk: "challenge"` |
+| `warn` | passes the request and marks it for the analyst | `wrn: "<rule id>"` |
+
+A skip rule also carries a *record matches* flag, which only the analyst reads: a recorded skip
+is still scored and shows on your dashboard as Allowed, an unrecorded one is dropped before
+scoring. Either way the request passes here, unstamped — the built-in Allow-list is a skip rule
+with recording on.
+
+A rule block also names the row that decided, so the response says which rule to edit:
+
+```
+HTTP/1.1 403 Forbidden
+x-block-reason: rule
+x-block-rule: cr_4f2a9c1b7e03
+```
+
+Every condition type enforces at this tap: `ip`, `path`, `ua` and `header` like everywhere else,
+plus the `asn`, `country` and `tlsx` conditions only `request.cf` can judge. A `header`
+condition (`is`, `contains`, `matches`) reads the name case-insensitively, and headers are the
+request plane's alone — the analyst never sees them, so a header rule is enforced by a v5 SDK
+like this one or not at all. A project that has not published the v5 container is answered with
+v4 or v3, and the lists in it keep enforcing.
 
 ## The challenge (SDK-04)
 
@@ -100,7 +135,7 @@ never challenged (it would mint a cookie any other unidentified client could pre
 | `trustedProxy` | server config | `none` / `vercel` / `hops:N` / `cidrs:a,b`, or the parsed object |
 | `challenge` | `true` | serve the proof-of-work page for `challenge` verdicts |
 | `challengePath` | `/__camada/challenge` | where that page posts its solution |
-| `snapshotVersion` | `4` | `3` opts out of the v4 allow/challenge sections |
+| `snapshotVersion` | `5` | `4` drops the custom rules, `3` the allow/challenge sides too |
 | `env` | `c.env` | overrides the Worker env (tests) |
 
 `CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
