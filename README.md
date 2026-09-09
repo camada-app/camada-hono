@@ -2,7 +2,7 @@
 
 camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant snapshot inline
 (your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
-challenge page and the first-party beacon, records the outcomes your handlers know (`track()`),
+challenge page and beacon, records the outcomes your handlers know (`track()`),
 and ships wire events through `waitUntil` so nothing is on the response path.
 Fails open by design — a camada outage or bug never 5xxes your app.
 

@@ -4,8 +4,8 @@
 // middleware did not run for this request (a path it is not mounted on, no key, CAMADA_DISABLED,
 // or a request it answered itself) there is nothing on the context and both helpers stand down.
 import type { Context } from 'hono';
-import { guarded, guardedAsync, hashUserId, logRateLimited, TAP_HONO } from '@camada/core';
-import type { Engine, WaitUntil } from './camada.js';
+import { guarded, guardedAsync, hashUserId, TAP_HONO } from '@camada/core';
+import { ship, type Engine, type WaitUntil } from './camada.js';
 
 export const VAR = '__camada';
 
@@ -31,18 +31,14 @@ const readVars = (c: Context): CamadaVars | undefined => c.get(VAR) as CamadaVar
  * optional (the flush rides `waitUntil`), so a handler may fire and forget.
  */
 export function track(c: Context, event: string, data?: { user?: string }): Promise<void> {
-  return guardedAsync(async () => {
-    const vars = readVars(c);
-    if (!vars) return;
-    const { eng, rid, sid, ip, waitUntil } = vars;
-    const p = (async () => {
-      const uid = data?.user ? await hashUserId(data.user, eng.env.ingestToken, crypto.subtle) : null;
-      eng.queue.push({ tap: TAP_HONO, et: event, uid, rid, sid, ip, ts: Date.now() });
-      eng.queue.flush(waitUntil);   // the isolate may freeze right after the response: flush now, held open by waitUntil
-    })().catch(logRateLimited);
-    waitUntil(p);
-    await p;
+  const vars = guarded(() => readVars(c), undefined);
+  if (!vars) return Promise.resolve();
+  const p = guardedAsync(async () => {
+    const uid = data?.user ? await hashUserId(data.user, vars.eng.env.ingestToken) : null;
+    ship(vars.eng, { tap: TAP_HONO, et: event, uid, rid: vars.rid, sid: vars.sid, ip: vars.ip, ts: Date.now() }, vars.waitUntil);
   }, undefined);
+  vars.waitUntil(p);   // the isolate may freeze right after the response: hold it open for the flush
+  return p;
 }
 
 /** The `<script>` tag for an HTML response — `''` when camada is off for this request or the tenant turned the beacon off. */

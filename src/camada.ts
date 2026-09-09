@@ -133,7 +133,8 @@ function buildEvent(
   return ev;
 }
 
-function ship(e: Engine, ev: WireEvent, waitUntil: WaitUntil): void {
+/** Push then flush through `waitUntil` — the one rule every row (wire event, beacon, track()) follows. */
+export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): void {
   e.queue.push(ev);
   e.queue.flush(waitUntil);
 }
@@ -148,8 +149,7 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
   // Spread first: the ip and the tap are the server's to say, whatever the body claimed.
-  eng.queue.push({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO });
-  eng.queue.flush(waitUntil);
+  ship(eng, { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO }, waitUntil);
   return noContent();
 }
 
