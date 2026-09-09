@@ -2,7 +2,8 @@
 
 camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant snapshot inline
 (your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
-challenge page, and ships wire events through `waitUntil` so nothing is on the response path.
+challenge page and the first-party beacon, records the outcomes your handlers know (`track()`),
+and ships wire events through `waitUntil` so nothing is on the response path.
 Fails open by design — a camada outage or bug never 5xxes your app.
 
 Not yet on npm — consumed via a `file:` dependency from a sibling checkout.
@@ -136,11 +137,66 @@ never challenged (it would mint a cookie any other unidentified client could pre
 | `challenge` | `true` | serve the proof-of-work page for `challenge` verdicts |
 | `challengePath` | `/__camada/challenge` | where that page posts its solution |
 | `snapshotVersion` | `5` | `4` drops the custom rules, `3` the allow/challenge sides too |
+| `scriptPath` | `/_cam/b.js` | where the first-party beacon script is served |
+| `fpPath` | `/_cam/fp` | where that script posts the beacon; keep it in `scriptPath`'s directory |
 | `env` | `c.env` | overrides the Worker env (tests) |
 
 `CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
 
 `CAMADA_DISABLED=1` in the Worker env switches everything off, checked per request.
+
+## The first-party beacon
+
+Bots that never run JavaScript are the cheapest to catch. Put the tag in the `<head>` of the
+pages you render and the middleware does the rest:
+
+```ts
+import { camada, scriptTag } from '@camada/hono';
+
+app.use('*', camada());
+app.get('/', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>…</body></html>`));
+```
+
+`scriptTag(c)` returns `<script src="/_cam/b.js?r=<rid>" async></script>` — the `rid` is this
+request's event id, so the analyst joins the beacon to the page view. The middleware serves the
+script at `GET /_cam/b.js` (cacheable, 1 h) and relays `POST /_cam/fp` (≤ 32 KB, answers 204)
+onto the event batch as a `sig: 1` row stamped with the client ip camada resolved — never the
+one the body claims. Both endpoints sit behind the verdict: a blocked client gets 403 there
+too. The tag is `''` when camada is off for the request or the project turned the beacon off
+in its settings, and the endpoints stand down with it.
+
+Mounting on a prefix (`app.use('/api/*', camada())`) means `/_cam/*` never reaches the
+middleware; move both paths under it — `camada({ scriptPath: '/api/_cam/b.js', fpPath:
+'/api/_cam/fp' })` — the script derives the post path from its own `src`, so the two must
+share a directory.
+
+## App-context events
+
+The wire shows a `POST /login`; only your handler knows whether it failed. Tell camada:
+
+```ts
+import { camada, track } from '@camada/hono';
+
+app.post('/login', async (c) => {
+  const ok = await signIn(c);
+  if (!ok) track(c, 'login_failed', { user: email });   // await optional — the flush rides waitUntil
+  return ok ? c.redirect('/') : c.text('Invalid credentials', 401);
+});
+```
+
+`track(c, event, { user? })` ships `{ et, uid, rid, sid, ip, ts }` joined to this request's event.
+The user identifier is HMAC-hashed in-process with the ingest token — the raw value never leaves
+the isolate. It never throws and is a no-op where the middleware did not run. The event name is
+free-form; the analyst's rules read this vocabulary:
+
+| event | when |
+|---|---|
+| `login_failed` / `login_succeeded` | a credential check settled |
+| `signup` | an account was created |
+| `password_reset` | a reset was requested |
+| `mfa_failed` | a second factor was rejected |
+| `payment_failed` / `payment_succeeded` | a charge settled |
+| `coupon_failed` | a promo code was rejected |
 
 ## What this tap can see
 
@@ -148,9 +204,10 @@ never challenged (it would mint a cookie any other unidentified client could pre
 `httpProtocol`, so ASN, country and TLS-fingerprint rules genuinely enforce here — unlike a bare
 Node app, which sees none of them. The connection terminates at Cloudflare, so the protocol on
 the event is the visitor's own, not a proxy hop's (camada never reads a forwarded protocol
-header for it). workerd normalises header order, so the raw-wire-order signal is not available
-at this position; the analyst knows that from the tap's capability mask (`sdk-hono`) and never
-scores its absence as evidence.
+header for it). With the beacon and `track()` it is the full in-app position. workerd
+normalises header order, so the raw-wire-order signal is the one thing not available here; the
+analyst knows that from the tap's capability mask (`sdk-hono`) and never scores its absence as
+evidence.
 
 ## Fail open
 

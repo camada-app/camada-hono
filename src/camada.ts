@@ -6,6 +6,7 @@
 // Everything runs inside camada's fail-open envelope: a camada bug, a dead ingest or a corrupt
 // snapshot costs telemetry, never the app's response.
 import type { Context, MiddlewareHandler, Next } from 'hono';
+import iife from '@camada/browser/iife-string';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync,
   guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
@@ -13,21 +14,26 @@ import {
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
+import { VAR, beaconEnabled, type CamadaVars } from './context.js';
 import { SDK_ID } from './version.js';
 
 const DEFAULT_CHALLENGE_PATH = '/__camada/challenge';
+const SCRIPT_PATH = '/_cam/b.js';   // the beacon IIFE; its auto-init posts to the sibling `fp` and reads the rid from ?r=
+const FP_PATH = '/_cam/fp';
+const FP_MAX = 32 * 1024;        // matches the analyst's /fp cap: never accept what ingest will 413
 const SESSION_COOKIE = '_sfp';   // the same session cookie as every other tap: sid/ns stay comparable
 const SESSION_MAX_AGE = 2592000;
 const BODY_MAX = 4 * 1024;       // the verify form is ~120 bytes; anything larger is not ours
+const encoder = new TextEncoder();
 
-interface Engine {
+export interface Engine {
   env: ResolvedEnv;
   snap: SnapshotClient;
   queue: EventQueue;
   kit: AsyncChallengeKit;
 }
 
-type WaitUntil = (p: Promise<unknown>) => void;
+export type WaitUntil = (p: Promise<unknown>) => void;
 
 // One engine per resolved configuration, not per module: a Workers isolate can host several
 // Hono apps, and a shared singleton would enforce the first tenant's snapshot on the second
@@ -104,7 +110,10 @@ function describeRequest(e: Engine, req: Request): RequestFacts {
   return { url, path: url.pathname, cf: cfOf(req), ip: clientIp(e, req), sid: cookieValue(cookies, SESSION_COOKIE) };
 }
 
-function buildEvent(req: Request, path: string, query: string, ip: string | null, sid: string | null): WireEvent {
+function buildEvent(
+  req: Request, path: string, query: string, ip: string | null, sid: string | null,
+  rid: string = crypto.randomUUID(), newSession = false,   // the capture path passes the ids it shared with the app; camada's own answers need none
+): WireEvent {
   const headers: Array<[string, string]> = [];
   req.headers.forEach((v, k) => headers.push([k, v]));   // workerd normalises header order: no HEADER_ORDER signal here
   const cf = cfOf(req);
@@ -116,7 +125,7 @@ function buildEvent(req: Request, path: string, query: string, ip: string | null
       // a forwarded header for this — that would be the proxy's hop, not the client's.
       httpVersion: cf.httpProtocol ? cf.httpProtocol.replace(/^HTTP\//i, '') : null,
     },
-    { tap: TAP_HONO, rid: crypto.randomUUID(), sid, newSession: false },
+    { tap: TAP_HONO, rid, sid, newSession },
   );
   if (cf.asn) ev.asn = cf.asn;
   if (cf.country) ev.cc = cf.country;
@@ -129,8 +138,25 @@ function ship(e: Engine, ev: WireEvent, waitUntil: WaitUntil): void {
   e.queue.flush(waitUntil);
 }
 
+/** 204 and a `sig: 1` row on the event batch — one request per flush at the analyst, not one per page view. */
+async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUntil: WaitUntil): Promise<Response> {
+  const noContent = () => new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } });
+  if (Number(req.headers.get('content-length')) > FP_MAX) return new Response(null, { status: 413 });
+  const body = await req.text();
+  if (encoder.encode(body).byteLength > FP_MAX) return new Response(null, { status: 413 });
+  let parsed: unknown;
+  try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
+  // Spread first: the ip and the tap are the server's to say, whatever the body claimed.
+  eng.queue.push({ ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO });
+  eng.queue.flush(waitUntil);
+  return noContent();
+}
+
 export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
   const challengePath = opts.challengePath ?? DEFAULT_CHALLENGE_PATH;
+  const scriptPath = opts.scriptPath ?? SCRIPT_PATH;
+  const fpPath = opts.fpPath ?? FP_PATH;
 
   return async function camadaHono(c: Context, next: Next): Promise<Response | void> {
     // Reading c.env and building the engine are inside the guard too: a Workers env carries
@@ -148,6 +174,10 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // The id of the `warn` rule that let this request through, read again after next() when the
     // response event is built (§D3). Every other action settles before the app ever runs.
     let warnRule: string | null = null;
+    // Set on the capture path only: the ids this request shares with the app (scriptTag, track)
+    // and with its own post-response event. Null when camada answered the request itself.
+    let vars: CamadaVars | null = null;
+    let newSession = false;
 
     const answer = await guardedAsync(async (): Promise<Response | null> => {
       eng.snap.ensureFresh(waitUntil);
@@ -188,6 +218,22 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
           return serve(eng, req, ip, sid, challengePath, path + url.search, waitUntil);
         }
       }
+
+      // The beacon endpoints come after enforcement (a blocked or challenged client gets neither
+      // the script nor a relay) and before the app (they are camada's, not its) — @camada/node's order.
+      if (beaconEnabled(eng)) {
+        if (req.method === 'GET' && path === scriptPath) {
+          return new Response(iife, { status: 200, headers: { 'content-type': 'application/javascript', 'cache-control': 'public, max-age=3600' } });
+        }
+        if (req.method === 'POST' && path === fpPath) return relayBeacon(eng, req, ip, waitUntil);
+      }
+
+      // Capture: mint the ids the app, the beacon and the post-response event all share. The
+      // session is decided here rather than after next() so track() inside the handler and the
+      // event both carry the sid a first visit is about to be given.
+      newSession = !sid;
+      vars = { eng, rid: crypto.randomUUID(), sid: sid ?? crypto.randomUUID(), ip, waitUntil, scriptPath };
+      c.set(VAR, vars);
       return null;
     }, null);
 
@@ -198,21 +244,21 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
     // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one.
     guarded(() => {
-      const req = c.req.raw;
-      if (cookieValue(req.headers.get('cookie') || '', SESSION_COOKIE)) return;
-      const secure = new URL(req.url).protocol === 'https:' ? '; Secure' : '';
-      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${crypto.randomUUID()}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
+      if (!vars || !newSession) return;
+      const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
+      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
     }, undefined);
 
     // The response has settled, so this tap ships the real status — unlike @camada/next's
     // middleware position, which can only report pre-response.
     void guardedAsync(async () => {
       const req = c.req.raw;
-      const { url, path, ip, sid } = describeRequest(eng, req);
+      const { url, path, ip } = describeRequest(eng, req);
       const cfg = eng.snap.config;
       if ((cfg?.exclude || []).some((x) => path.startsWith(x))) return;
       if (Math.random() >= (cfg?.sample ?? 1)) return;
-      const ev = buildEvent(req, path, url.search, ip, sid);
+      // `vars` is null only when the guard above threw before setting it — then the event still ships, with fresh ids.
+      const ev = buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
       ev.st = c.res.status;
       if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
       ship(eng, ev, waitUntil);

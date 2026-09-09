@@ -7,7 +7,8 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Hono } from 'hono';
 import { CHALLENGE_COOKIE } from '@camada/core';
-import { camada, resetCamada, type CamadaHonoOptions } from '../src/index.js';
+import iife from '@camada/browser/iife-string';
+import { camada, resetCamada, track, scriptTag, type CamadaHonoOptions } from '../src/index.js';
 
 const FIX = fileURLToPath(new URL('../node_modules/@camada/core/test/fixtures/blk3/', import.meta.url));
 const FIX5 = fileURLToPath(new URL('../node_modules/@camada/core/test/fixtures/blk5/', import.meta.url));
@@ -33,7 +34,8 @@ const BLOCKED_UA = 'curl/8.4.0';                       // cr_00000000000f, block
 const BLOCKED_HEADER = 'x-api-key';                    // cr_000000000019, `header is` → block
 const BLOCKED_HEADER_VALUE = 'leaked-key-1';
 
-const CONFIG = { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 };
+const BASE_CONFIG = { tenant: 'acme', beacon: true, sample: 1, exclude: [], trusted_proxy: { mode: 'none' }, poll_seconds: 30 };
+let CONFIG = BASE_CONFIG;   // one test serves `beacon: false`; reset in beforeEach
 const ENV = { CAMADA_KEY: 'tok-acme.snap-acme', CAMADA_INGEST_URL: 'http://analyst.test', CAMADA_SNAPSHOT_URL: 'http://analyst.test/snapshot' };
 
 // 200 body frame: [u32 LE meta-length][meta JSON][BLK bin]
@@ -72,6 +74,9 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/healthz', (c) => c.text('ok'));
   a.get('/api/v2/dump', (c) => c.text('dump'));
   a.get('/missing-route-is-404', (c) => c.notFound());
+  a.get('/page', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>page</body></html>`));
+  a.post('/login', async (c) => { await track(c, 'login_failed', { user: 'alice@example.com' }); return c.text('no', 401); });
+  a.post('/signup', (c) => { void track(c, 'signup'); return c.text('ok'); });   // fire-and-forget: waitUntil must carry it
   return a;
 }
 
@@ -126,7 +131,11 @@ const solve = (nonce: string): string => {
   for (let n = 0; ; n++) if (createHash('sha256').update(`${nonce}.${n}`).digest('hex').startsWith('0000')) return String(n);
 };
 
-beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; tenantTokens = []; served = V4; resetCamada(); });
+beforeEach(() => { events = []; sdkHeaders = []; snapshotVersions = []; tenantTokens = []; served = V4; CONFIG = BASE_CONFIG; resetCamada(); });
+
+const ridOf = (html: string): string => /\?r=([0-9a-f-]{36})"/.exec(html)![1];
+const postBeacon = (a: Hono, body: string, ip = '9.9.9.9', path = '/_cam/fp'): Promise<Response> =>
+  call(a, path, { method: 'POST', headers: { 'cf-connecting-ip': ip, 'content-type': 'application/json' }, body });
 
 describe('capture', () => {
   it('lets an unlisted request through and ships the event with the real status', async () => {
@@ -418,6 +427,139 @@ describe('session', () => {
     const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=known-sid' } });
     expect(res.headers.get('set-cookie')).toBeNull();
     expect(events.at(-1)).toMatchObject({ sid: 'known-sid' });
+  });
+});
+
+describe('first-party beacon', () => {
+  it('serves the IIFE at /_cam/b.js and ships nothing for it', async () => {
+    const a = await primed();
+    const res = await call(a, '/_cam/b.js?r=abc', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('javascript');
+    expect(res.headers.get('cache-control')).toBe('public, max-age=3600');
+    expect(await res.text()).toBe(iife);
+    expect(events).toEqual([]);
+  });
+
+  it('relays /_cam/fp as a sig:1 row with the server-resolved ip and tap', async () => {
+    const a = await primed();
+    const res = await postBeacon(a, JSON.stringify({ rid: 'abc', tz: 'UTC', ip: '1.1.1.1', tap: 'proxy' }));
+    expect(res.status).toBe(204);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-hono' });
+    expect(events[0].st).toBeUndefined();
+  });
+
+  it('joins the beacon to the page event on rid', async () => {
+    const a = await primed();
+    const html = await (await call(a, '/page', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).text();
+    const rid = ridOf(html);
+    expect(events.find((e) => e.p === '/page')).toMatchObject({ rid, tap: 'sdk-hono' });
+    await postBeacon(a, JSON.stringify({ rid, tz: 'UTC' }), '8.8.8.8');
+    expect(events.find((e) => e.sig === 1)).toMatchObject({ rid, ip: '8.8.8.8' });
+  });
+
+  it('drops a body that is not a beacon', async () => {
+    const a = await primed();
+    expect((await postBeacon(a, 'not-json')).status).toBe(204);
+    expect((await postBeacon(a, '[1,2]')).status).toBe(204);
+    expect(events).toEqual([]);
+  });
+
+  it('rejects an oversized beacon', async () => {
+    const a = await primed();
+    expect((await postBeacon(a, 'x'.repeat(80 * 1024))).status).toBe(413);
+    expect(events).toEqual([]);
+  });
+
+  it('still blocks a blocked client at both endpoints', async () => {
+    const a = await primed();
+    const script = await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': BLOCKED_IP } });
+    expect(script.status).toBe(403);
+    expect(script.headers.get('x-block-reason')).toBe('ip4');
+    const fp = await postBeacon(a, JSON.stringify({ rid: 'abc' }), BLOCKED_IP);
+    expect(fp.status).toBe(403);
+    expect(events).toHaveLength(2);
+    expect(events.every((e) => e.blk === 'ip4' && e.sig === undefined)).toBe(true);
+  });
+
+  it('serves nothing when the tenant disabled the beacon', async () => {
+    CONFIG = { ...BASE_CONFIG, beacon: false };
+    const a = await primed();
+    expect((await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(404);
+    const html = await (await call(a, '/page', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).text();
+    expect(html).not.toContain('<script');
+  });
+
+  it('honours scriptPath and fpPath', async () => {
+    const a = await primed({ scriptPath: '/api/cam/b.js', fpPath: '/api/cam/fp' });
+    const html = await (await call(a, '/page', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).text();
+    expect(html).toContain('<script src="/api/cam/b.js?r=');
+    expect((await call(a, '/api/cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(200);
+    expect((await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(404);
+    events.length = 0;
+    expect((await postBeacon(a, JSON.stringify({ rid: 'abc' }), '9.9.9.9', '/api/cam/fp')).status).toBe(204);
+    expect(events[0]).toMatchObject({ sig: 1, rid: 'abc' });
+  });
+
+  it('emits no tag where the middleware did not run', async () => {
+    const bare = new Hono();
+    bare.get('/page', (c) => c.html(`<head>${scriptTag(c)}</head>`));
+    expect(await (await call(bare, '/page')).text()).toBe('<head></head>');
+    const off = new Hono();
+    off.use('*', camada({ env: { ...ENV, CAMADA_DISABLED: '1' }, fetchImpl }));
+    off.get('/page', (c) => c.html(`<head>${scriptTag(c)}</head>`));
+    expect(await (await call(off, '/page')).text()).toBe('<head></head>');
+  });
+});
+
+describe('track', () => {
+  it('ships an app-context event joined to the request, with the user hashed', async () => {
+    const a = await primed();
+    const res = await call(a, '/login', { method: 'POST', headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=known-sid' } });
+    expect(res.status).toBe(401);
+    const row = events.find((e) => e.et === 'login_failed')!;
+    expect(row).toMatchObject({ tap: 'sdk-hono', sid: 'known-sid', ip: '8.8.8.8' });
+    expect(row.uid).toMatch(/^[0-9a-f]{32}$/);
+    expect(typeof row.ts).toBe('number');
+    expect(row.p).toBeUndefined();
+    expect(row.st).toBeUndefined();
+    expect(row.rid).toBe(events.find((e) => e.p === '/login')!.rid);
+    expect(JSON.stringify(events)).not.toContain('alice');
+  });
+
+  it('uses the session it just minted on a first visit', async () => {
+    const a = await primed();
+    const res = await call(a, '/login', { method: 'POST', headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    const sid = /_sfp=([^;]+)/.exec(res.headers.get('set-cookie') ?? '')![1];
+    expect(events.find((e) => e.et === 'login_failed')).toMatchObject({ sid });
+    expect(events.find((e) => e.p === '/login')).toMatchObject({ sid, ns: 1 });
+  });
+
+  it('carries a fire-and-forget call through waitUntil, uid null without a user', async () => {
+    const a = await primed();
+    expect((await call(a, '/signup', { method: 'POST', headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(200);
+    expect(events.find((e) => e.et === 'signup')).toMatchObject({ uid: null, tap: 'sdk-hono' });
+  });
+
+  it('is a silent no-op where the middleware did not run', async () => {
+    const route = (h: Hono) => h.post('/login', async (c) => { expect(await track(c, 'login_failed', { user: 'x' })).toBeUndefined(); return c.text('ok'); });
+    const bare = route(new Hono());
+    expect((await call(bare, '/login', { method: 'POST' })).status).toBe(200);
+    const off = new Hono(); off.use('*', camada({ env: { ...ENV, CAMADA_DISABLED: '1' }, fetchImpl })); route(off);
+    expect((await call(off, '/login', { method: 'POST' })).status).toBe(200);
+    const unkeyed = new Hono(); unkeyed.use('*', camada({ env: {}, fetchImpl })); route(unkeyed);
+    expect((await call(unkeyed, '/login', { method: 'POST' })).status).toBe(200);
+    expect(events).toEqual([]);
+  });
+
+  it('never throws while ingest is down', async () => {
+    const dead: typeof fetch = (async () => { throw new Error('ECONNREFUSED'); }) as typeof fetch;
+    const a = new Hono();
+    a.use('*', camada({ env: ENV, fetchImpl: dead }));
+    a.post('/login', async (c) => { await track(c, 'login_failed', { user: 'alice' }); return c.text('no', 401); });
+    expect((await call(a, '/login', { method: 'POST', headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(401);
   });
 });
 

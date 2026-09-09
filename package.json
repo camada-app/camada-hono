@@ -1,6 +1,6 @@
 {
   "name": "@camada/hono",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "engines": {
@@ -17,7 +17,7 @@
     "test": "vitest run",
     "check": "tsc --noEmit"
   },
-  "description": "camada SDK for Hono on Cloudflare Workers: snapshot enforcement, first-party challenge, waitUntil-flushed event shipping",
+  "description": "camada SDK for Hono on Cloudflare Workers: snapshot enforcement, first-party challenge and beacon, track() outcomes, waitUntil-flushed event shipping",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -29,7 +29,8 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "@camada/core": "file:../camada-core"
+    "@camada/core": "file:../camada-core",
+    "@camada/browser": "file:../camada-browser"
   },
   "peerDependencies": {
     "hono": ">=4"
