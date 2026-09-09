@@ -19,6 +19,8 @@ export interface CamadaHonoOptions {
   challenge?: boolean;            // enforce `challenge` verdicts with the first-party page (default true)
   challengePath?: string;         // where that page posts its solution (default /__camada/challenge)
   snapshotVersion?: SnapshotVersion;   // 5 (default) also carries the tenant's ordered custom rules; 4 the allow/challenge sides only; 3 opts out of both
+  scriptPath?: string;            // where the first-party beacon script is served (default /_cam/b.js)
+  fpPath?: string;                // where that script posts the beacon (default /_cam/fp; must share scriptPath's directory — the script derives it)
   env?: Record<string, string | undefined>;   // overrides c.env (tests, and apps that read config themselves)
   fetchImpl?: typeof fetch;
 }
