@@ -470,6 +470,11 @@ describe('first-party beacon', () => {
   it('rejects an oversized beacon', async () => {
     const a = await primed();
     expect((await postBeacon(a, 'x'.repeat(80 * 1024))).status).toBe(413);
+    // The declared length is checked before the body is read: a client announcing 64 KB is refused unread.
+    const declared = await call(a, '/_cam/fp', {
+      method: 'POST', headers: { 'cf-connecting-ip': '9.9.9.9', 'content-type': 'application/json', 'content-length': String(64 * 1024) }, body: '{"rid":"abc"}',
+    });
+    expect(declared.status).toBe(413);
     expect(events).toEqual([]);
   });
 
@@ -488,6 +493,8 @@ describe('first-party beacon', () => {
     CONFIG = { ...BASE_CONFIG, beacon: false };
     const a = await primed();
     expect((await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).status).toBe(404);
+    expect((await postBeacon(a, JSON.stringify({ rid: 'abc' }))).status).toBe(404);   // falls through to the app, as @camada/node does
+    expect(events.some((e) => e.sig === 1)).toBe(false);
     const html = await (await call(a, '/page', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).text();
     expect(html).not.toContain('<script');
   });

@@ -1,2 +1,2 @@
 import { defineConfig } from 'tsup';
-export default defineConfig({ entry: ['src/index.ts'], format: ['esm', 'cjs'], dts: true, sourcemap: true, clean: true, external: ['@camada/core', '@camada/browser', '@camada/browser/iife-string', 'hono'] });
+export default defineConfig({ entry: ['src/index.ts'], format: ['esm', 'cjs'], dts: true, sourcemap: true, clean: true, external: ['@camada/core', '@camada/browser', 'hono'] });
