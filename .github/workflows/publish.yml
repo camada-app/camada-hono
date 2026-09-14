@@ -1,0 +1,44 @@
+name: publish
+# Ships a tagged release to npm through the trusted publisher (OIDC): no token. Provenance is
+# attached automatically. The tag must match package.json, e.g. `git tag v0.3.1 && git push origin v0.3.1`.
+# Release order matters: core, then browser and react, then the adapters (an adapter declares
+# the core/browser range it was staged with, so those must already be on npm).
+on:
+  push:
+    tags: ["v*"]
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: camada-hono
+      - uses: actions/checkout@v7
+        with:
+          repository: camada-app/camada-core
+          path: camada-core
+      - uses: actions/checkout@v7
+        with:
+          repository: camada-app/camada-browser
+          path: camada-browser
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org
+      - run: npm install && npm run build
+        working-directory: camada-core
+      - run: npm install && npm run build
+        working-directory: camada-browser
+      - run: npm install && npm run build && npm run check && npm test
+        working-directory: camada-hono
+      - name: tag matches the package version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          [ "v$v" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != version v$v"; exit 1; }
+        working-directory: camada-hono
+      - run: node ../camada-core/scripts/stage-publish.mjs . --publish
+        working-directory: camada-hono
