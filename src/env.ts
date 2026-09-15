@@ -35,7 +35,7 @@ export function resolveEnv(opts: CamadaHonoOptions, env: Record<string, string |
   const ingestToken = key?.ingestToken ?? env.CAMADA_TOKEN;
   const snapToken = key?.snapToken ?? env.CAMADA_SNAPSHOT_TOKEN;
   if (!ingestToken || !snapToken) return null;
-  const ingestUrl = (opts.ingestUrl || env.CAMADA_INGEST_URL || 'https://in.camada.dev').replace(/\/$/, '');   // PLACEHOLDER default — confirm the production ingest domain before any npm publish
+  const ingestUrl = (opts.ingestUrl || env.CAMADA_INGEST_URL || 'https://in.camada.app').replace(/\/$/, '');   // PLACEHOLDER default — confirm the production ingest domain before any npm publish
   return {
     ingestToken, snapToken,
     secret: raw || `${ingestToken}.${snapToken}`,
