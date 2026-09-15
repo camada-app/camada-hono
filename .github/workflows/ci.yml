@@ -1,0 +1,34 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20.x, 22.x]
+    steps:
+      - uses: actions/checkout@v7
+        with: { path: camada-hono }
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/camada-core
+          path: camada-core
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.repository_owner }}/camada-browser
+          path: camada-browser
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm install && npm run build
+        working-directory: camada-core
+      - run: npm install && npm run build
+        working-directory: camada-browser
+      - run: npm install
+        working-directory: camada-hono
+      - run: npm run build
+        working-directory: camada-hono
+      - run: npm run check
+        working-directory: camada-hono
+      - run: npm test
+        working-directory: camada-hono
