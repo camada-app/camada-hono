@@ -13,6 +13,7 @@ import {
   CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
+import { withSetCookie } from '@camada/core/fetch';
 import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
 import { VAR, beaconEnabled, type CamadaVars } from './context.js';
 import { SDK_ID } from './version.js';
@@ -274,16 +275,10 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       ship(eng, ev, waitUntil);
     }, undefined);
     try {
-      // Assign only a wrapped response: Hono's c.res setter rebuilds whatever it is given, and
-      // that copy loses a 101 upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun
-      // < 1.2.10, an empty body's status and headers.
-      const out = onBodyDone(c.res, shipEvent, { method, waitUntil });
-      if (out !== c.res) {
-        c.res = out;
-        // The setter copies the old response's headers back over the new one, including the stale
-        // Content-Encoding/Length the wrap dropped from a Deno-decoded fetch() body (see copyResponse).
-        for (const k of ['content-encoding', 'content-length']) if (!out.headers.has(k)) c.res.headers.delete(k);
-      }
+      // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
+      // upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun < 1.2.10, an empty body's
+      // status and headers.
+      replaceRes(c, onBodyDone(c.res, shipEvent, { method, waitUntil }));
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
       shipEvent();
@@ -292,13 +287,26 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
     // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one. After
     // the wrap, on the response that goes out: @hono/node-server rebuilds a wrapped response from
-    // its original init, so a cookie appended before would be lost.
+    // its original init, so a cookie appended before would be lost. An immutable response (a
+    // fetch() result, Response.redirect()) gets core's faithful copy; a 101 never does, since
+    // Deno < 2.6 stops Deno.serve over a copied upgrade.
     guarded(() => {
-      if (!vars || !newSession) return;
+      if (!vars || !newSession || c.res.status === 101) return;
       const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
-      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
+      replaceRes(c, withSetCookie(c.res, `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`));
     }, undefined);
   };
+}
+
+/** Sends `out` in place of c.res when it is a different object. Hono's c.res setter would copy it
+ *  again and copy the old response's headers back over it: the stale Content-Encoding/Length
+ *  copyResponse dropped from a Deno-decoded fetch() body, and a set-cookie list without ours.
+ *  `out` is already a faithful copy of c.res, so it goes in as is: the setter only merges into a
+ *  response it already holds. */
+function replaceRes(c: Context, out: Response): void {
+  if (out === c.res) return;
+  c.res = undefined;
+  c.res = out;
 }
 
 /** 403 + the proof-of-work page (HTML navigations) or 403 JSON, plus the `blk: "challenge"` event. */
