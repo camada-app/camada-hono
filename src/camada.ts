@@ -81,6 +81,8 @@ const cookieValue = (cookie: string, name: string): string | null => {
   return src.slice(start, j === -1 ? undefined : j);
 };
 
+interface BunServer { requestIP: (req: Request) => unknown }
+
 interface CfProps { asn?: number; country?: string; tlsClientExtensionsSha1?: string; httpProtocol?: string }
 const cfOf = (req: Request): CfProps => ((req as Request & { cf?: CfProps }).cf ?? {});
 
@@ -247,6 +249,14 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const req = c.req.raw;
     const method = req.method;
     const wsRequest = guarded(() => req.headers.get('upgrade')?.toLowerCase() === 'websocket', false);
+    // On Bun (hono/bun), c.env is the server, and server.upgrade() detaches the request from its
+    // socket: server.requestIP() turns null. That is the upgrade test there, since Bun keeps a string or
+    // Blob body's implicit Content-Type outside res.headers and a bare 200 alone is not proof.
+    const bun = wsRequest ? guarded(() => {
+      const e = c.env as { server?: unknown } | undefined;
+      const s = (e && 'server' in e ? e.server : e) as BunServer | undefined;   // hono/bun's getBunServer
+      return typeof s?.requestIP === 'function' && s.requestIP(req) ? s : null;
+    }, null) : null;
     const ev = guarded(() => {
       const { url, path, ip } = describeRequest(eng, req);
       return buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
@@ -262,7 +272,9 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // Bun (hono/bun) and @hono/node-ws answer an accepted WebSocket upgrade with a bare
     // `new Response()` (200, no Content-Type) that the server discards as it switches protocols;
     // Deno and workerd hand back the 101 itself.
-    const status = wsRequest && c.res.status === 200 && !c.res.headers.has('content-type') ? 101 : c.res.status;
+    const upgraded = wsRequest && c.res.status === 200 && !c.res.headers.has('content-type')
+      && (bun ? guarded(() => bun.requestIP(req) === null, false) : true);
+    const status = upgraded ? 101 : c.res.status;
     const shipEvent = () => void guardedAsync(async () => {
       if (!ev) return;
       const cfg = eng.snap.config;
@@ -290,10 +302,19 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // its original init, so a cookie appended before would be lost. An immutable response (a
     // fetch() result, Response.redirect()) gets core's faithful copy; a 101 never does, since
     // Deno < 2.6 stops Deno.serve over a copied upgrade.
+    // Hono answers HEAD with `new Response(null, <the GET response>)`, and @hono/node-server 1.x
+    // rebuilds that from the GET response's original init, dropping a header appended since. So a
+    // HEAD gets that copy built here, exactly as Hono would build it, with the cookie in its init.
+    // Where the copy throws (node-server 1.x on an init-less response), the app's 500 goes out as is.
     guarded(() => {
       if (!vars || !newSession || c.res.status === 101) return;
       const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
-      replaceRes(c, withSetCookie(c.res, `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`));
+      const cookie = `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
+      if (method !== 'HEAD') return replaceRes(c, withSetCookie(c.res, cookie));
+      const head = new Response(null, c.res);
+      const headers = new Headers(head.headers);
+      headers.append('set-cookie', cookie);
+      replaceRes(c, new Response(null, { status: head.status, statusText: head.statusText, headers }));
     }, undefined);
   };
 }
