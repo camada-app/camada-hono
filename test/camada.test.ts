@@ -64,6 +64,16 @@ const fetchImpl: typeof fetch = (async (url: string | URL | Request, init?: Requ
   return new Response(null, { status: 202 });
 }) as typeof fetch;
 
+/** Responses the app hands back as they are: camada must send these very objects, not copies. */
+const kept: Record<string, () => Response> = {
+  fixed: () => new Response('x'.repeat(5000)),
+  redirect: () => Response.redirect('http://app.test/', 302),
+  empty: () => new Response(null, { status: 204, headers: { 'set-cookie': 'a=1' } }),
+  stream: () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('x')); c.close(); } })),
+};
+const lastKept: Response[] = [];
+for (const [k, f] of Object.entries(kept)) kept[k] = () => { const r = f(); lastKept.push(r); return r; };
+
 function app(opts: CamadaHonoOptions = {}): Hono {
   const a = new Hono();
   a.use('*', camada({ env: ENV, fetchImpl, ...opts }));
@@ -76,8 +86,9 @@ function app(opts: CamadaHonoOptions = {}): Hono {
     let i = 0;   // three chunks 40 ms apart: a body that outlives the handler
     return new Response(new ReadableStream({
       async pull(ctrl) { await new Promise((r) => setTimeout(r, 40)); if (i++ < 3) ctrl.enqueue(new TextEncoder().encode('x')); else ctrl.close(); },
-    }));
+    }), { headers: { 'content-type': 'text/event-stream' } });
   });
+  a.get('/same/:kind', (c) => kept[c.req.param('kind')]!());
   a.get('/api/v2/dump', (c) => c.text('dump'));
   a.get('/missing-route-is-404', (c) => c.notFound());
   a.get('/page', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>page</body></html>`));
@@ -171,6 +182,35 @@ describe('capture', () => {
     await settle();   // waitUntil held the isolate until the body ended, and carries the flush
     expect(events.find((e) => e.p === '/stream')).toMatchObject({ st: 200 });
     expect(events.find((e) => e.p === '/stream')!.dur as number).toBeGreaterThanOrEqual(140);
+  });
+
+  it('stamps ts at the request start, so [ts, ts + dur] is when the request ran', async () => {
+    const a = await primed();
+    const t = Date.now();
+    await call(a, '/stream', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    const ev = events.find((e) => e.p === '/stream')!;
+    expect(ev.ts as number).toBeGreaterThanOrEqual(t);
+    expect(ev.ts as number).toBeLessThanOrEqual(t + 20);   // the start, not the settle ~160 ms later
+  });
+
+  it('sets the session cookie on a first-visit SSE response, on the wrapped response that goes out', async () => {
+    const a = await primed();
+    const res = await call(a, '/stream', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
+    expect(res.headers.getSetCookie().some((c) => c.startsWith('_sfp='))).toBe(true);
+  });
+
+  it('sends the app\'s own Response object for everything but an SSE body, so nothing is rebuilt', async () => {
+    // Hono's c.res setter copies whatever it is given; that copy breaks a 101 upgrade on Deno < 2.6
+    // and drops Bun's implicit Content-Type. A cookied visitor gets no session cookie appended.
+    const a = await primed();
+    for (const kind of Object.keys(kept)) {
+      const req = new Request(`http://app.test/same/${kind}`, { headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=s1' } });
+      const { ctx, settle } = executionCtx();
+      expect(await a.fetch(req, {}, ctx), kind).toBe(lastKept.at(-1));
+      await settle();
+    }
+    expect(events.filter((e) => String(e.p).startsWith('/same/'))).toHaveLength(Object.keys(kept).length);   // each shipped at return
   });
 
   it('reports its identity on every batch and asks for the newest snapshot', async () => {
