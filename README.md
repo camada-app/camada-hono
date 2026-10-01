@@ -76,7 +76,15 @@ unprovisioned environment behaves exactly as if camada were not installed.
 6. **Challenge** → a `403` proof-of-work page (see below).
 7. Otherwise your handler runs, and the settled response ships one batched, redacted event with
    its real status (Authorization and Cookie values never leave the isolate; credential-looking
-   query values are scrubbed — see `@camada/core`).
+   query values are scrubbed — see `@camada/core`). The event's `ts` is the request start and
+   `dur` runs from there to the response: to its last byte for a `text/event-stream` body
+   (a client that leaves early ends it), and to the moment your handler returned for anything
+   else, which is the time to first byte (for a buffered body, effectively the whole response).
+   camada sends your handler's Response object itself. It only re-wraps an event-stream body,
+   with the same status and headers. One host quirk: once any middleware reads `c.res.headers`,
+   `@hono/node-server` sends its default `content-type: text/plain; charset=UTF-8` on a response
+   built with plain-object headers and no content type. camada reads them on every request, as
+   Hono's own cors, etag and secureHeaders middleware do.
 
 ## Custom rules
 

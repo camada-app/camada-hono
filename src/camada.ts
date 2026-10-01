@@ -159,7 +159,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
   const fpPath = opts.fpPath ?? FP_PATH;
 
   return async function camadaHono(c: Context, next: Next): Promise<Response | void> {
-    const t0 = Date.now();   // request start; the response event ships dur = settle - t0 (ms), @camada/node's semantics
+    const t0 = Date.now();   // request start; the response event ships ts = t0 and dur = settle - t0 (ms), @camada/node's semantics
     // Reading c.env and building the engine are inside the guard too: a Workers env carries
     // non-string bindings, and a throw here would 5xx the app on its very first request.
     const env = guarded(() => ({ ...(c.env as Record<string, string | undefined> | undefined), ...opts.env }), {} as Record<string, string | undefined>);
@@ -242,18 +242,11 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
 
     await next();
 
-    // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
-    // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one.
-    guarded(() => {
-      if (!vars || !newSession) return;
-      const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
-      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
-    }, undefined);
-
     // The handler has answered, so this tap ships the real status — unlike @camada/next's
-    // middleware position, which can only report pre-response. It ships once the body has gone
-    // out (or the client left), so dur covers a streamed body, not just its first byte. waitUntil
-    // holds the isolate until then: workerd stops pumping a body the client abandoned otherwise.
+    // middleware position, which can only report pre-response. A server-sent-events body ships
+    // once it has gone out (or the client left), so dur covers the stream, and waitUntil holds
+    // the isolate until then: workerd stops pumping a body the client abandoned otherwise. Any
+    // other response ships now and is left exactly as the app returned it (see onBodyDone).
     const status = c.res.status;
     const shipEvent = () => void guardedAsync(async () => {
       const req = c.req.raw;
@@ -263,17 +256,32 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       if (Math.random() >= (cfg?.sample ?? 1)) return;
       // `vars` is null only when the guard above threw before setting it — then the event still ships, with fresh ids.
       const ev = buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
+      ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
       ev.st = status;
       ev.dur = Math.max(0, Date.now() - t0);
       if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
       ship(eng, ev, waitUntil);
     }, undefined);
     try {
-      c.res = onBodyDone(c.res, shipEvent, { method: c.req.raw.method, waitUntil });
+      // Assign only a wrapped response: Hono's c.res setter rebuilds whatever it is given, and
+      // that copy loses a 101 upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun
+      // < 1.2.10, an empty body's status and headers.
+      const out = onBodyDone(c.res, shipEvent, { method: c.req.raw.method, waitUntil });
+      if (out !== c.res) c.res = out;
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
       shipEvent();
     }
+
+    // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
+    // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one. After
+    // the wrap, on the response that goes out: @hono/node-server rebuilds a wrapped response from
+    // its original init, so a cookie appended before would be lost.
+    guarded(() => {
+      if (!vars || !newSession) return;
+      const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
+      c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
+    }, undefined);
   };
 }
 
