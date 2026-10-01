@@ -8,7 +8,7 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import iife from '@camada/browser/iife-string';
 import {
-  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync,
+  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
   guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
   CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
@@ -250,9 +250,12 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       c.res.headers.append('set-cookie', `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`);
     }, undefined);
 
-    // The response has settled, so this tap ships the real status — unlike @camada/next's
-    // middleware position, which can only report pre-response.
-    void guardedAsync(async () => {
+    // The handler has answered, so this tap ships the real status — unlike @camada/next's
+    // middleware position, which can only report pre-response. It ships once the body has gone
+    // out (or the client left), so dur covers a streamed body, not just its first byte. waitUntil
+    // holds the isolate until then: workerd stops pumping a body the client abandoned otherwise.
+    const status = c.res.status;
+    const shipEvent = () => void guardedAsync(async () => {
       const req = c.req.raw;
       const { url, path, ip } = describeRequest(eng, req);
       const cfg = eng.snap.config;
@@ -260,11 +263,17 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       if (Math.random() >= (cfg?.sample ?? 1)) return;
       // `vars` is null only when the guard above threw before setting it — then the event still ships, with fresh ids.
       const ev = buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
-      ev.st = c.res.status;
+      ev.st = status;
       ev.dur = Math.max(0, Date.now() - t0);
       if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
       ship(eng, ev, waitUntil);
     }, undefined);
+    try {
+      c.res = onBodyDone(c.res, shipEvent, { method: c.req.raw.method, waitUntil });
+    } catch (err) {
+      logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
+      shipEvent();
+    }
   };
 }
 

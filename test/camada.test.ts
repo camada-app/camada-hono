@@ -72,6 +72,12 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/checkout', (c) => c.html('<p>checkout</p>'));
   a.get('/admin/users', (c) => c.html('<p>admin</p>'));
   a.get('/healthz', (c) => c.text('ok'));
+  a.get('/stream', () => {
+    let i = 0;   // three chunks 40 ms apart: a body that outlives the handler
+    return new Response(new ReadableStream({
+      async pull(ctrl) { await new Promise((r) => setTimeout(r, 40)); if (i++ < 3) ctrl.enqueue(new TextEncoder().encode('x')); else ctrl.close(); },
+    }));
+  });
   a.get('/api/v2/dump', (c) => c.text('dump'));
   a.get('/missing-route-is-404', (c) => c.notFound());
   a.get('/page', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>page</body></html>`));
@@ -94,8 +100,9 @@ async function call(a: Hono, path: string, init: RequestInit = {}, cf: Record<st
   if (cf) Object.defineProperty(req, 'cf', { value: cf });
   const { ctx, settle } = executionCtx();
   const res = await a.fetch(req, {}, ctx);
+  const body = res.body ? await res.arrayBuffer() : null;   // send the body as Workers would: the event ships once it has gone out
   await settle();
-  return res;
+  return new Response(body, res);
 }
 
 /** Drives a raw Request with the `cf` properties Workers would attach. */
@@ -150,6 +157,20 @@ describe('capture', () => {
     await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
     const dur = events.at(-1)!.dur as number;
     expect(Number.isInteger(dur) && dur >= 0).toBe(true);
+  });
+
+  it('times a streamed body to its last byte, flushing through waitUntil', async () => {
+    const a = await primed();
+    const req = new Request('http://app.test/stream', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    Object.defineProperty(req, 'cf', { value: {} });
+    const { ctx, settle } = executionCtx();
+    const res = await a.fetch(req, {}, ctx);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events.some((e) => e.p === '/stream')).toBe(false);   // still streaming: nothing shipped yet
+    expect(await res.text()).toBe('xxx');
+    await settle();   // waitUntil held the isolate until the body ended, and carries the flush
+    expect(events.find((e) => e.p === '/stream')).toMatchObject({ st: 200 });
+    expect(events.find((e) => e.p === '/stream')!.dur as number).toBeGreaterThanOrEqual(140);
   });
 
   it('reports its identity on every batch and asks for the newest snapshot', async () => {
