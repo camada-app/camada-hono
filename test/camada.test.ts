@@ -94,6 +94,12 @@ function app(opts: CamadaHonoOptions = {}): Hono {
     Object.defineProperty(res, Symbol('response'), { value: { bodyDecoded: true } });
     return res;
   });
+  a.get('/gz-decoded', () => {   // a Deno 2.9 fetch() of a gzip upstream: decoded body, stale gzip headers, immutable
+    const res = new Response('hello', { headers: { 'content-encoding': 'gzip', 'content-length': '74', 'x-up': '1', 'set-cookie': 'up=1' } });
+    Object.defineProperty(res, Symbol('response'), { value: { bodyDecoded: true } });
+    Object.defineProperty(res.headers, 'append', { value: () => { throw new TypeError('immutable'); } });
+    return res;
+  });
   a.get('/ws-bare', () => new Response());   // hono/bun and @hono/node-ws after an accepted upgrade
   a.get('/ws-deno', (c) => {   // Deno.upgradeWebSocket: the request is closed, the 101 comes back as is
     for (const k of ['headers', 'url', 'method']) Object.defineProperty(c.req.raw, k, { get: () => { throw new TypeError('Request closed'); } });
@@ -525,6 +531,31 @@ describe('session', () => {
     const res = await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
     expect(res.headers.get('set-cookie')).toContain('_sfp=');
     expect(res.headers.get('set-cookie')).toContain('HttpOnly');
+  });
+
+  it('gives a first visit the cookie on immutable responses too, through a faithful copy', async () => {
+    // Response.redirect() and a Deno 2.9 fetch() of a gzip upstream (decoded body, stale gzip headers):
+    // the copy keeps status, Location and body, and drops what Deno.serve would have dropped.
+    const a = await primed();
+    const redirect = await call(a, '/same/redirect', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(redirect.status).toBe(302);
+    expect(redirect.headers.get('location')).toBe('http://app.test/');
+    expect(redirect.headers.getSetCookie()).toEqual([expect.stringMatching(/^_sfp=/)]);
+    const gz = await call(a, '/gz-decoded', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    expect(gz.headers.getSetCookie()).toEqual(['up=1', expect.stringMatching(/^_sfp=/)]);
+    expect(gz.headers.get('content-encoding')).toBeNull();
+    expect(gz.headers.get('content-length')).toBeNull();
+    expect(gz.headers.get('x-up')).toBe('1');
+    expect(await gz.text()).toBe('hello');
+  });
+
+  it('never copies a first-visit WebSocket 101 to cookie it', async () => {
+    const a = await primed();
+    const { ctx, settle } = executionCtx();
+    const res = await a.fetch(new Request('http://app.test/ws-deno', { headers: { 'cf-connecting-ip': '8.8.8.8', upgrade: 'websocket' } }), {}, ctx);
+    await settle();
+    expect(res.status).toBe(101);
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
   it('never overwrites an existing session', async () => {
