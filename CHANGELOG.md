@@ -15,6 +15,8 @@ Needs `@camada/core` 0.5.0.
 
 ### Fixed
 
+- Path rules match the canonical path (through `@camada/core` 0.5.0). A percent-encoded,
+  upper-cased or trailing-slash spelling of a blocked path used to slip past the block.
 - WebSocket upgrades ship one event with `st: 101` on every runtime: workerd, Deno, Bun
   (`hono/bun`) and Node (`@hono/node-ws`). On Deno 2.9 an upgrade used to ship no event, because
   the request is closed once `Deno.upgradeWebSocket` returns. On Bun, only a request that
