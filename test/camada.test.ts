@@ -1,7 +1,7 @@
 // @camada/hono against the golden v4 and v5 snapshots, driven through a real Hono app with
 // app.request(). The fixtures are read through the file: symlink to @camada/core, so this
 // package is pinned to the same bytes edge-analyst generates.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -101,6 +101,7 @@ function app(opts: CamadaHonoOptions = {}): Hono {
     return res;
   });
   a.get('/ws-bare', () => new Response());   // hono/bun and @hono/node-ws after an accepted upgrade
+  a.get('/ws-bun', (c) => { (c.env as { upgrade: (r: Request) => boolean }).upgrade(c.req.raw); return new Response(null); });   // hono/bun, accepted or not
   a.get('/ws-deno', (c) => {   // Deno.upgradeWebSocket: the request is closed, the 101 comes back as is
     for (const k of ['headers', 'url', 'method']) Object.defineProperty(c.req.raw, k, { get: () => { throw new TypeError('Request closed'); } });
     const res = Response.error();   // immutable headers; undici will not build a 101 itself
@@ -254,6 +255,21 @@ describe('capture', () => {
     await call(a, '/ws-bare', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // not an upgrade request: the 200 it is
     await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', upgrade: 'websocket' } });   // an upgrade the app answered with a page
     expect(events.map((e) => e.st)).toEqual([200, 200]);
+  });
+
+  it('on Bun, records 101 only for a request server.upgrade() took', async () => {
+    // Bun keeps a string or Blob body's implicit Content-Type outside res.headers, so a bare 200 does
+    // not tell an upgrade apart: server.requestIP() turning null once the socket is taken does.
+    const a = await primed();
+    const ws = { 'cf-connecting-ip': '8.8.8.8', upgrade: 'websocket', connection: 'Upgrade' };
+    for (const take of [true, false]) {
+      let taken = false;
+      const server = { requestIP: () => (taken ? null : { address: '127.0.0.1' }), upgrade: () => (taken = take) };
+      const { ctx, settle } = executionCtx();
+      await a.fetch(new Request('http://app.test/ws-bun', { headers: ws }), server, ctx);
+      await settle();
+    }
+    expect(events.map((e) => e.st)).toEqual([101, 200]);
   });
 
   it('reports its identity on every batch and asks for the newest snapshot', async () => {
@@ -547,6 +563,29 @@ describe('session', () => {
     expect(gz.headers.get('content-length')).toBeNull();
     expect(gz.headers.get('x-up')).toBe('1');
     expect(await gz.text()).toBe('hello');
+  });
+
+  it('gives a first-visit HEAD the cookie under @hono/node-server', async () => {
+    // Hono answers HEAD with new Response(null, <the GET response>), and node-server's lightweight
+    // Response rebuilds that from the GET response's original init: a header appended since is lost.
+    class LightResponse extends Response {
+      readonly init: ResponseInit | undefined;
+      constructor(body?: BodyInit | null, init?: ResponseInit) {
+        const own = init instanceof LightResponse ? init.init : init;
+        super(body, own);
+        this.init = own;
+      }
+    }
+    vi.stubGlobal('Response', LightResponse);
+    try {
+      const a = await primed();
+      const res = await call(a, '/', { method: 'HEAD', headers: { 'cf-connecting-ip': '8.8.8.8' } });
+      expect(res.status).toBe(200);
+      expect(res.headers.getSetCookie()).toEqual([expect.stringMatching(/^_sfp=.*HttpOnly/)]);
+      expect(events.at(-1)).toMatchObject({ m: 'HEAD', st: 200, ns: 1 });
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('never copies a first-visit WebSocket 101 to cookie it', async () => {

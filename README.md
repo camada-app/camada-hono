@@ -84,7 +84,11 @@ unprovisioned environment behaves exactly as if camada were not installed.
    with the same status and headers. A first visit is given the `_sfp` session cookie; when the
    response's headers are immutable (a `fetch()` result, `Response.redirect()`), it goes out as
    a faithful copy with the cookie added: same status, headers and body bytes (see
-   `@camada/core`'s `copyResponse`). A WebSocket `101` is never copied and gets no cookie. One host quirk: once any middleware reads `c.res.headers`,
+   `@camada/core`'s `copyResponse`). A `HEAD` gets the cookie too, including on
+   `@hono/node-server` 1.x, whose `HEAD` copy would otherwise drop it. A WebSocket `101` is never
+   copied and gets no cookie. An accepted upgrade ships `st: 101` on every runtime; on Bun that
+   means `server.upgrade()` really took the socket, so a plain `GET` carrying `Upgrade: websocket`
+   that your handler answered ships the status it sent. One host quirk: once any middleware reads `c.res.headers`,
    `@hono/node-server` sends its default `content-type: text/plain; charset=UTF-8` on a response
    built with plain-object headers and no content type. camada reads them on every request, as
    Hono's own cors, etag and secureHeaders middleware do.
