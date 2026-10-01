@@ -257,7 +257,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // The handler has answered, so this tap ships the real status — unlike @camada/next's
     // middleware position, which can only report pre-response. A server-sent-events body ships
     // once it has gone out (or the client left), so dur covers the stream, and waitUntil holds
-    // the isolate until then: workerd stops pumping a body the client abandoned otherwise. Any
+    // the isolate until then (on workerd through a native pipe that sees the client leave). Any
     // other response ships now and is left exactly as the app returned it (see onBodyDone).
     // Bun (hono/bun) and @hono/node-ws answer an accepted WebSocket upgrade with a bare
     // `new Response()` (200, no Content-Type) that the server discards as it switches protocols;
@@ -278,7 +278,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
       // upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun < 1.2.10, an empty body's
       // status and headers.
-      replaceRes(c, onBodyDone(c.res, shipEvent, { method, waitUntil }));
+      replaceRes(c, onBodyDone(c.res, shipEvent, { method, waitUntil, get signal() { return c.req.raw.signal; } }));   // signal read on workerd only
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
       shipEvent();
