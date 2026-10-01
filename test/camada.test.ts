@@ -89,6 +89,11 @@ function app(opts: CamadaHonoOptions = {}): Hono {
     }), { headers: { 'content-type': 'text/event-stream' } });
   });
   a.get('/same/:kind', (c) => kept[c.req.param('kind')]!());
+  a.get('/sse-decoded', () => {   // a Deno 2.9 fetch() of a gzip SSE upstream: decoded body, stale gzip header, immutable
+    const res = new Response('data: x\n\n', { headers: { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' } });
+    Object.defineProperty(res, Symbol('response'), { value: { bodyDecoded: true } });
+    return res;
+  });
   a.get('/ws-bare', () => new Response());   // hono/bun and @hono/node-ws after an accepted upgrade
   a.get('/ws-deno', (c) => {   // Deno.upgradeWebSocket: the request is closed, the 101 comes back as is
     for (const k of ['headers', 'url', 'method']) Object.defineProperty(c.req.raw, k, { get: () => { throw new TypeError('Request closed'); } });
@@ -218,6 +223,14 @@ describe('capture', () => {
       await settle();
     }
     expect(events.filter((e) => String(e.p).startsWith('/same/'))).toHaveLength(Object.keys(kept).length);   // each shipped at return
+  });
+
+  it('wraps a Deno-decoded SSE fetch() body without putting its stale Content-Encoding back', async () => {
+    const a = await primed();
+    const res = await call(a, '/sse-decoded', { headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=s1' } });
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
+    expect(res.headers.get('content-encoding')).toBeNull();
+    expect(await res.text()).toBe('data: x\n\n');
   });
 
   it('ships exactly one st 101 event per WebSocket upgrade, on every host shape', async () => {

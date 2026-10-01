@@ -278,7 +278,12 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // that copy loses a 101 upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun
       // < 1.2.10, an empty body's status and headers.
       const out = onBodyDone(c.res, shipEvent, { method, waitUntil });
-      if (out !== c.res) c.res = out;
+      if (out !== c.res) {
+        c.res = out;
+        // The setter copies the old response's headers back over the new one, including the stale
+        // Content-Encoding/Length the wrap dropped from a Deno-decoded fetch() body (see copyResponse).
+        for (const k of ['content-encoding', 'content-length']) if (!out.headers.has(k)) c.res.headers.delete(k);
+      }
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
       shipEvent();
