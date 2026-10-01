@@ -6,7 +6,11 @@ challenge page and beacon, records the outcomes your handlers know (`track()`),
 and ships wire events through `waitUntil` so nothing is on the response path.
 Fails open by design — a camada outage or bug never 5xxes your app.
 
-Not yet on npm — consumed via a `file:` dependency from a sibling checkout.
+```sh
+npm install @camada/hono
+```
+
+Needs `hono` 4 or later (a peer dependency) and Node 20 or later wherever Node runs it.
 
 ## Quickstart
 
