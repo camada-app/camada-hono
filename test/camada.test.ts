@@ -145,6 +145,13 @@ describe('capture', () => {
     expect(events.some((e) => e.tap === 'sdk-hono' && e.p === '/' && e.st === 200)).toBe(true);
   });
 
+  it('ships dur as a non-negative whole number of ms', async () => {
+    const a = await primed();
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    const dur = events.at(-1)!.dur as number;
+    expect(Number.isInteger(dur) && dur >= 0).toBe(true);
+  });
+
   it('reports its identity on every batch and asks for the newest snapshot', async () => {
     const a = await primed();
     await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });

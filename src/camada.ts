@@ -159,6 +159,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
   const fpPath = opts.fpPath ?? FP_PATH;
 
   return async function camadaHono(c: Context, next: Next): Promise<Response | void> {
+    const t0 = Date.now();   // request start; the response event ships dur = settle - t0 (ms), @camada/node's semantics
     // Reading c.env and building the engine are inside the guard too: a Workers env carries
     // non-string bindings, and a throw here would 5xx the app on its very first request.
     const env = guarded(() => ({ ...(c.env as Record<string, string | undefined> | undefined), ...opts.env }), {} as Record<string, string | undefined>);
@@ -260,6 +261,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // `vars` is null only when the guard above threw before setting it — then the event still ships, with fresh ids.
       const ev = buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
       ev.st = c.res.status;
+      ev.dur = Math.max(0, Date.now() - t0);
       if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
       ship(eng, ev, waitUntil);
     }, undefined);
