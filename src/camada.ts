@@ -240,6 +240,17 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
 
     if (answer) return answer;
 
+    // Read the request now, before the app runs: after Deno.upgradeWebSocket it is closed and
+    // reading its headers throws. `vars` is null only when the guard above threw before setting
+    // it — then the event still ships, with fresh ids.
+    const req = c.req.raw;
+    const method = req.method;
+    const wsRequest = guarded(() => req.headers.get('upgrade')?.toLowerCase() === 'websocket', false);
+    const ev = guarded(() => {
+      const { url, path, ip } = describeRequest(eng, req);
+      return buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
+    }, null);
+
     await next();
 
     // The handler has answered, so this tap ships the real status — unlike @camada/next's
@@ -247,15 +258,15 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // once it has gone out (or the client left), so dur covers the stream, and waitUntil holds
     // the isolate until then: workerd stops pumping a body the client abandoned otherwise. Any
     // other response ships now and is left exactly as the app returned it (see onBodyDone).
-    const status = c.res.status;
+    // Bun (hono/bun) and @hono/node-ws answer an accepted WebSocket upgrade with a bare
+    // `new Response()` (200, no Content-Type) that the server discards as it switches protocols;
+    // Deno and workerd hand back the 101 itself.
+    const status = wsRequest && c.res.status === 200 && !c.res.headers.has('content-type') ? 101 : c.res.status;
     const shipEvent = () => void guardedAsync(async () => {
-      const req = c.req.raw;
-      const { url, path, ip } = describeRequest(eng, req);
+      if (!ev) return;
       const cfg = eng.snap.config;
-      if ((cfg?.exclude || []).some((x) => path.startsWith(x))) return;
+      if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x))) return;
       if (Math.random() >= (cfg?.sample ?? 1)) return;
-      // `vars` is null only when the guard above threw before setting it — then the event still ships, with fresh ids.
-      const ev = buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
       ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
       ev.st = status;
       ev.dur = Math.max(0, Date.now() - t0);
@@ -266,7 +277,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // Assign only a wrapped response: Hono's c.res setter rebuilds whatever it is given, and
       // that copy loses a 101 upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun
       // < 1.2.10, an empty body's status and headers.
-      const out = onBodyDone(c.res, shipEvent, { method: c.req.raw.method, waitUntil });
+      const out = onBodyDone(c.res, shipEvent, { method, waitUntil });
       if (out !== c.res) c.res = out;
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched

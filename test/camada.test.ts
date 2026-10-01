@@ -89,6 +89,13 @@ function app(opts: CamadaHonoOptions = {}): Hono {
     }), { headers: { 'content-type': 'text/event-stream' } });
   });
   a.get('/same/:kind', (c) => kept[c.req.param('kind')]!());
+  a.get('/ws-bare', () => new Response());   // hono/bun and @hono/node-ws after an accepted upgrade
+  a.get('/ws-deno', (c) => {   // Deno.upgradeWebSocket: the request is closed, the 101 comes back as is
+    for (const k of ['headers', 'url', 'method']) Object.defineProperty(c.req.raw, k, { get: () => { throw new TypeError('Request closed'); } });
+    const res = Response.error();   // immutable headers; undici will not build a 101 itself
+    Object.defineProperty(res, 'status', { value: 101 });
+    return res;
+  });
   a.get('/api/v2/dump', (c) => c.text('dump'));
   a.get('/missing-route-is-404', (c) => c.notFound());
   a.get('/page', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>page</body></html>`));
@@ -211,6 +218,23 @@ describe('capture', () => {
       await settle();
     }
     expect(events.filter((e) => String(e.p).startsWith('/same/'))).toHaveLength(Object.keys(kept).length);   // each shipped at return
+  });
+
+  it('ships exactly one st 101 event per WebSocket upgrade, on every host shape', async () => {
+    const a = await primed();
+    const ws = { 'cf-connecting-ip': '8.8.8.8', upgrade: 'websocket', connection: 'Upgrade', cookie: '_sfp=s1' };
+    for (const path of ['/ws-deno', '/ws-bare']) {
+      events.length = 0;
+      const { ctx, settle } = executionCtx();
+      const res = await a.fetch(new Request(`http://app.test${path}`, { headers: ws }), {}, ctx);
+      await settle();
+      expect(res.headers.get('set-cookie'), path).toBeNull();
+      expect(events, path).toEqual([expect.objectContaining({ p: path, st: 101, sid: 's1' })]);
+    }
+    events.length = 0;
+    await call(a, '/ws-bare', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // not an upgrade request: the 200 it is
+    await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8', upgrade: 'websocket' } });   // an upgrade the app answered with a page
+    expect(events.map((e) => e.st)).toEqual([200, 200]);
   });
 
   it('reports its identity on every batch and asks for the newest snapshot', async () => {
