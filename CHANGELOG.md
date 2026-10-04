@@ -4,6 +4,11 @@
 
 Needs `@camada/core` 0.5.0.
 
+### Added
+
+- `x-rid` response header: the rid of the request's event row, on every response the app answers
+  (a faithful copy when the headers are immutable). Not on camada's own answers or a 101.
+
 ### Changed
 
 - `ts` is the request start, so `[ts, ts + dur]` is when the request ran.
