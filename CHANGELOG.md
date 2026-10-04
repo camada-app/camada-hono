@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.3.2 (unreleased; follows 0.3.1)
+## 0.3.2 (2026-10-04; follows 0.3.1)
 
 Needs `@camada/core` 0.5.0.
 
