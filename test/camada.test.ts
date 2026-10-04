@@ -182,6 +182,17 @@ describe('capture', () => {
     expect(events.some((e) => e.tap === 'sdk-hono' && e.p === '/' && e.st === 200)).toBe(true);
   });
 
+  it('sets x-rid to the event rid on answered responses (an immutable redirect included) and not on a block', async () => {
+    const a = await primed();
+    for (const path of ['/', '/same/redirect']) {
+      const res = await call(a, path, { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+      expect(res.headers.get('x-rid'), path).toBe(events.find((e) => e.p === path)!.rid);
+    }
+    const blocked = await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } });
+    expect(blocked.status).toBe(403);
+    expect(blocked.headers.has('x-rid')).toBe(false);
+  });
+
   it('ships dur as a non-negative whole number of ms', async () => {
     const a = await primed();
     await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
@@ -226,7 +237,9 @@ describe('capture', () => {
     for (const kind of Object.keys(kept)) {
       const req = new Request(`http://app.test/same/${kind}`, { headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=s1' } });
       const { ctx, settle } = executionCtx();
-      expect(await a.fetch(req, {}, ctx), kind).toBe(lastKept.at(-1));
+      const res = await a.fetch(req, {}, ctx);
+      if (kind === 'redirect') expect(res.headers.get('location')).toBe('http://app.test/');   // immutable headers: a faithful copy carries x-rid
+      else expect(res, kind).toBe(lastKept.at(-1));
       await settle();
     }
     expect(events.filter((e) => String(e.p).startsWith('/same/'))).toHaveLength(Object.keys(kept).length);   // each shipped at return
