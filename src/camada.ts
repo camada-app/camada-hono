@@ -13,7 +13,7 @@ import {
   CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
-import { withSetCookie } from '@camada/core/fetch';
+import { withSetCookie, withRid } from '@camada/core/fetch';
 import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
 import { VAR, beaconEnabled, type CamadaVars } from './context.js';
 import { SDK_ID } from './version.js';
@@ -290,6 +290,9 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
       // upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun < 1.2.10, an empty body's
       // status and headers.
+      // x-rid goes on first, so the wrapped SSE body copies it. Never on a 101 (or Bun's discarded stand-in for one).
+      const rid = ev?.rid as string | undefined;
+      if (rid && !upgraded) replaceRes(c, guarded(() => withRid(c.res, { rid }), c.res));
       replaceRes(c, onBodyDone(c.res, shipEvent, { method, waitUntil, get signal() { return c.req.raw.signal; } }));   // signal read on workerd only
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
