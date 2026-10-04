@@ -92,12 +92,13 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/sse-decoded', () => {   // a Deno 2.9 fetch() of a gzip SSE upstream: decoded body, stale gzip header, immutable
     const res = new Response('data: x\n\n', { headers: { 'content-type': 'text/event-stream', 'content-encoding': 'gzip' } });
     Object.defineProperty(res, Symbol('response'), { value: { bodyDecoded: true } });
+    Object.defineProperty(res.headers, 'set', { value: () => { throw new TypeError('immutable'); } });
     return res;
   });
   a.get('/gz-decoded', () => {   // a Deno 2.9 fetch() of a gzip upstream: decoded body, stale gzip headers, immutable
     const res = new Response('hello', { headers: { 'content-encoding': 'gzip', 'content-length': '74', 'x-up': '1', 'set-cookie': 'up=1' } });
     Object.defineProperty(res, Symbol('response'), { value: { bodyDecoded: true } });
-    Object.defineProperty(res.headers, 'append', { value: () => { throw new TypeError('immutable'); } });
+    for (const m of ['set', 'append']) Object.defineProperty(res.headers, m, { value: () => { throw new TypeError('immutable'); } });
     return res;
   });
   a.get('/ws-bare', () => new Response());   // hono/bun and @hono/node-ws after an accepted upgrade
@@ -125,6 +126,16 @@ function executionCtx(): { ctx: never; settle: () => Promise<unknown> } {
 
 /** Drives one request as Workers would deliver it — `request.cf` present, which is what makes
  *  `cf-connecting-ip` trustworthy. `cf: null` drives the same request on a non-Workers runtime. */
+/** @hono/node-server 1.x's lightweight Response: rebuilds from its original init, losing headers set since. */
+class LightResponse extends Response {
+  readonly init: ResponseInit | undefined;
+  constructor(body?: BodyInit | null, init?: ResponseInit) {
+    const own = init instanceof LightResponse ? init.init : init;
+    super(body, own);
+    this.init = own;
+  }
+}
+
 async function call(a: Hono, path: string, init: RequestInit = {}, cf: Record<string, unknown> | null = {}): Promise<Response> {
   const req = new Request(`http://app.test${path}`, init);
   if (cf) Object.defineProperty(req, 'cf', { value: cf });
@@ -581,14 +592,6 @@ describe('session', () => {
   it('gives a first-visit HEAD the cookie under @hono/node-server', async () => {
     // Hono answers HEAD with new Response(null, <the GET response>), and node-server's lightweight
     // Response rebuilds that from the GET response's original init: a header appended since is lost.
-    class LightResponse extends Response {
-      readonly init: ResponseInit | undefined;
-      constructor(body?: BodyInit | null, init?: ResponseInit) {
-        const own = init instanceof LightResponse ? init.init : init;
-        super(body, own);
-        this.init = own;
-      }
-    }
     vi.stubGlobal('Response', LightResponse);
     try {
       const a = await primed();
@@ -601,6 +604,22 @@ describe('session', () => {
     }
   });
 
+  it('keeps x-rid on SSE and HEAD under @hono/node-server (a.fetch called directly, no re-wrap)', async () => {
+    vi.stubGlobal('Response', LightResponse);
+    try {
+      const a = await primed();
+      for (const [path, method] of [['/stream', 'GET'], ['/', 'HEAD']] as const) {
+        const { ctx, settle } = executionCtx();
+        const res = await a.fetch(new Request(`http://app.test${path}`, { method, headers: { 'cf-connecting-ip': '8.8.8.8', cookie: '_sfp=s1' } }), {}, ctx);
+        await res.body?.cancel();
+        await settle();
+        expect(res.headers.get('x-rid'), `${method} ${path}`).toBe(events.filter((e) => e.p === path).at(-1)!.rid);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it('never copies a first-visit WebSocket 101 to cookie it', async () => {
     const a = await primed();
     const { ctx, settle } = executionCtx();
@@ -608,6 +627,7 @@ describe('session', () => {
     await settle();
     expect(res.status).toBe(101);
     expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.has('x-rid')).toBe(false);
   });
 
   it('never overwrites an existing session', async () => {
