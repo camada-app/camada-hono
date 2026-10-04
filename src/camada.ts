@@ -290,33 +290,41 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
       // upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun < 1.2.10, an empty body's
       // status and headers.
-      // x-rid goes on first, so the wrapped SSE body copies it. Never on a 101 (or Bun's discarded stand-in for one).
-      const rid = ev?.rid as string | undefined;
-      if (rid && !upgraded) replaceRes(c, guarded(() => withRid(c.res, { rid }), c.res));
       replaceRes(c, onBodyDone(c.res, shipEvent, { method, waitUntil, get signal() { return c.req.raw.signal; } }));   // signal read on workerd only
     } catch (err) {
       logRateLimited(err);   // a locked or foreign body: ship now (time to first byte), the response untouched
       shipEvent();
     }
 
-    // Mint the shared session cookie the other taps use, so `sid`/`ns` are real here too
-    // (ea's capability mask for sdk-hono claims SESSION). Never overwrite an existing one. After
-    // the wrap, on the response that goes out: @hono/node-server rebuilds a wrapped response from
-    // its original init, so a cookie appended before would be lost. An immutable response (a
-    // fetch() result, Response.redirect()) gets core's faithful copy; a 101 never does, since
-    // Deno < 2.6 stops Deno.serve over a copied upgrade.
-    // Hono answers HEAD with `new Response(null, <the GET response>)`, and @hono/node-server 1.x
-    // rebuilds that from the GET response's original init, dropping a header appended since. So a
-    // HEAD gets that copy built here, exactly as Hono would build it, with the cookie in its init.
+    // Stamp x-rid (the rid of the shipped row) and mint the shared session cookie the other taps
+    // use, so `sid`/`ns` are real here too (ea's capability mask for sdk-hono claims SESSION).
+    // Never overwrite an existing cookie. After the wrap, on the response that goes out:
+    // @hono/node-server 1.x rebuilds a wrapped (or HEAD) response from its original init, so a
+    // header set before would be lost. An immutable response (a fetch() result, Response.redirect())
+    // gets core's faithful copy; a 101 never does (core's withRid skips it too), since Deno < 2.6
+    // stops Deno.serve over a copied upgrade.
+    // Hono answers HEAD with `new Response(null, <the GET response>)`, rebuilt the same way. So a
+    // HEAD gets that copy built here, exactly as Hono would build it, with the headers in its init.
     // Where the copy throws (node-server 1.x on an init-less response), the app's 500 goes out as is.
     guarded(() => {
-      if (!vars || !newSession || c.res.status === 101) return;
-      const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
-      const cookie = `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
-      if (method !== 'HEAD') return replaceRes(c, withSetCookie(c.res, cookie));
+      if (c.res.status === 101) return;
+      const rid = ev?.rid as string | undefined;
+      let cookie: string | undefined;
+      if (vars && newSession) {
+        const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
+        cookie = `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
+      }
+      if (!rid && !cookie) return;
+      if (method !== 'HEAD') {
+        let out = c.res;
+        if (cookie) out = withSetCookie(out, cookie);
+        if (rid) out = withRid(out, { rid });
+        return replaceRes(c, out);
+      }
       const head = new Response(null, c.res);
       const headers = new Headers(head.headers);
-      headers.append('set-cookie', cookie);
+      if (cookie) headers.append('set-cookie', cookie);
+      if (rid) headers.set('x-rid', rid);
       replaceRes(c, new Response(null, { status: head.status, statusText: head.statusText, headers }));
     }, undefined);
   };
