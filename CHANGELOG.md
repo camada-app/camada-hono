@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.3 (2026-10-09; follows 0.3.2)
+
+Needs `@camada/core` 0.5.1.
+
+### Fixed
+
+- The snapshot client no longer re-polls back to back when `/snapshot` fails. It keeps its blocks and
+  waits max(`retry-after`, 5 s), capped at the refresh interval (through `@camada/core` 0.5.1,
+  camada-all-pbv9).
+
 ## 0.3.2 (2026-10-04; follows 0.3.1)
 
 Needs `@camada/core` 0.5.0.
