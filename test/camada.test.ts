@@ -811,3 +811,45 @@ describe('fail open', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('streamed bodies at the endpoints camada answers (camada-all-4u4i)', () => {
+  const CHUNK = 1024;
+  /** A 1 MB length-less body, pulled on demand, recording what was read and whether it was cancelled. */
+  function source() {
+    const s = { pulled: 0, cancelled: false, stream: null as unknown as ReadableStream<Uint8Array> };
+    let sent = 0;
+    s.stream = new ReadableStream<Uint8Array>({
+      pull(ctrl) {
+        if (sent++ >= 1024) { ctrl.close(); return; }
+        s.pulled += CHUNK;
+        ctrl.enqueue(new Uint8Array(CHUNK).fill(0x78));
+      },
+      cancel() { s.cancelled = true; },
+    }, { highWaterMark: 0 });
+    return s;
+  }
+  const post = (a: Hono, path: string, body: ReadableStream<Uint8Array>) =>
+    call(a, path, { method: 'POST', headers: { 'cf-connecting-ip': '9.9.9.9' }, body, duplex: 'half' } as RequestInit);
+
+  it('/_cam/fp: 413 after at most 32 KB + one chunk, source cancelled', async () => {
+    const a = await primed();
+    const s = source();
+    expect((await post(a, '/_cam/fp', s.stream)).status).toBe(413);
+    expect(s.cancelled).toBe(true);
+    expect(s.pulled).toBeLessThanOrEqual(32 * 1024 + CHUNK);
+    expect(events).toEqual([]);
+  });
+
+  it('challenge verify: 413 after at most 4 KB + one chunk, source cancelled', async () => {
+    const a = await primed();
+    const s = source();
+    expect((await post(a, '/__camada/challenge', s.stream)).status).toBe(413);
+    expect(s.cancelled).toBe(true);
+    expect(s.pulled).toBeLessThanOrEqual(4 * 1024 + CHUNK);
+  });
+
+  it('challenge verify counts bytes, not UTF-16 units', async () => {
+    const a = await primed();
+    expect((await postSolution(a, CHALLENGED_IP, `nonce=${'é'.repeat(2100)}`)).status).toBe(413);   // 2100 units, 4200 bytes
+  });
+});
