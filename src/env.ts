@@ -37,8 +37,9 @@ export interface CamadaHonoOptions {
 }
 
 /** A host variable: the merged env first (c.env + opts.env), then the process's own env
- *  (process.env, or Deno.env where the permission is already granted — never a prompt). A Deno
- *  without the permission API (Deno Deploy) has no prompt either, so its env is read directly:
+ *  (process.env, or Deno.env where the permission is already granted — never a prompt; a Deno whose
+ *  permission API has no querySync is not read). A Deno without the permission API (Deno Deploy)
+ *  has no prompt either, so its env is read directly:
  *  that is where DENO_DEPLOYMENT_ID tells a short-lived isolate apart from a long-lived server. */
 export function hostVar(name: string, env: Record<string, string | undefined>): string | undefined {
   if (env[name] !== undefined) return env[name];
@@ -48,8 +49,10 @@ export function hostVar(name: string, env: Record<string, string | undefined>): 
   };
   try {
     if (g.Deno) {
-      const query = g.Deno.permissions?.querySync;
-      if (typeof query === 'function' && query.call(g.Deno.permissions, { name: 'env', variable: name }).state !== 'granted') return undefined;
+      const perms = g.Deno.permissions;
+      if (perms) {   // a permission API without querySync (Deno <1.37) cannot be asked silently: don't read (R7-3)
+        if (typeof perms.querySync !== 'function' || perms.querySync({ name: 'env', variable: name }).state !== 'granted') return undefined;
+      }
       return g.Deno.env?.get?.(name);   // a throw (NotCapable) reads as unset, below
     }
     return g.process?.env?.[name];

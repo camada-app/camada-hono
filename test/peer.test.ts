@@ -218,6 +218,15 @@ describe('flushing off Workers (hono ship(), the 7u3r rule)', () => {
     expect(reads).toBe(0);
   });
 
+  it('Deno with a permission API but no querySync (Deno <1.37): never read, so no TTY prompt (R7-3)', async () => {
+    let reads = 0;
+    vi.stubGlobal('Deno', { version: { deno: '1.36.0' }, permissions: {}, env: { get: () => { reads++; return 'dep-1'; } } });
+    const a = app();
+    await requests(a, 3, runtimes['Deno']!);
+    expect(reads).toBe(0);
+    expect(posts).toBe(0);
+  });
+
   it('a Deno.env.get that throws reads as unset', async () => {
     vi.stubGlobal('Deno', { version: { deno: '2.1.0' }, env: { get: () => { throw new Error('NotCapable'); } } });
     const a = app();
