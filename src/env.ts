@@ -1,5 +1,6 @@
 // Workers hand env vars per request on `c.env`, not on a process — so the engine is built from
 // whatever the first request carries, merged with the options the app passed in code.
+import type { Context } from 'hono';
 import { parseKey, parseTrustedProxyEnv, type SnapshotVersion, type TrustedProxyConfig } from '@camada/core';
 
 export interface ResolvedEnv {
@@ -23,6 +24,33 @@ export interface CamadaHonoOptions {
   fpPath?: string;                // where that script posts the beacon (default /_cam/fp; must share scriptPath's directory — the script derives it)
   env?: Record<string, string | undefined>;   // overrides c.env (tests, and apps that read config themselves)
   fetchImpl?: typeof fetch;
+  /** Off Workers: the socket peer for this request, when the runtime object on `c.env` is not
+   *  one camada reads itself (node-server, Bun, Deno) — e.g. `(c) => getConnInfo(c).remote.address`.
+   *  Goes through the trusted-proxy rules with X-Forwarded-For. Never consulted on Workers. */
+  peer?: (c: Context) => string | null | undefined;
+  /** How rows reach ingest where there is no execution context (always per row through waitUntil
+   *  where there is one). 'timer': batch on the queue's 15 s timer and drain on exit — for a
+   *  long-lived server. 'lazy': flush every row as it is shipped — for a function that freezes after
+   *  the response. Unset: 'timer' only on a recognised node-server / Bun / Deno server outside
+   *  Vercel, AWS Lambda, Netlify and Deno Deploy, else 'lazy'. CAMADA_SERVERLESS=1 forces 'lazy'. */
+  mode?: 'timer' | 'lazy';
+}
+
+/** A host variable: the merged env first (c.env + opts.env), then the process's own env
+ *  (process.env, or Deno.env where the permission is already granted — never a prompt). */
+export function hostVar(name: string, env: Record<string, string | undefined>): string | undefined {
+  if (env[name] !== undefined) return env[name];
+  const g = globalThis as {
+    Deno?: { env?: { get?: (k: string) => string | undefined }; permissions?: { querySync?: (d: { name: string; variable: string }) => { state: string } } };
+    process?: { env?: Record<string, string | undefined> };
+  };
+  try {
+    if (g.Deno) {
+      if (g.Deno.permissions?.querySync?.({ name: 'env', variable: name }).state !== 'granted') return undefined;
+      return g.Deno.env?.get?.(name);
+    }
+    return g.process?.env?.[name];
+  } catch { return undefined; }
 }
 
 const asProxy = (v: CamadaHonoOptions['trustedProxy']): TrustedProxyConfig | null =>
@@ -41,6 +69,8 @@ export function resolveEnv(opts: CamadaHonoOptions, env: Record<string, string |
     secret: raw || `${ingestToken}.${snapToken}`,
     ingestUrl,
     snapshotUrl: opts.snapshotUrl || env.CAMADA_SNAPSHOT_URL || `${ingestUrl}/snapshot`,
-    trustedProxy: asProxy(opts.trustedProxy) ?? parseTrustedProxyEnv(env.CAMADA_TRUSTED_PROXY),
+    // On Vercel the platform rewrites X-Forwarded-For, so its rightmost entry is the client (as @camada/next).
+    trustedProxy: asProxy(opts.trustedProxy) ?? parseTrustedProxyEnv(env.CAMADA_TRUSTED_PROXY)
+      ?? (hostVar('VERCEL', env) ? { mode: 'vercel' } : null),
   };
 }
