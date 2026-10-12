@@ -330,6 +330,21 @@ describe('capture', () => {
 });
 
 describe('enforcement', () => {
+  it('a block 403 is no-store and an upstream public cache-control does not survive on it (camada-all-8lp6)', async () => {
+    for (const upstream of [
+      (c: Context) => { c.header('cache-control', 'public, max-age=600'); },
+      (c: Context) => { c.res.headers.set('cache-control', 'public, max-age=600'); },
+    ]) {
+      const a = new Hono();
+      a.use('*', async (c, next) => { upstream(c); await next(); });
+      a.use('*', camada({ env: ENV, fetchImpl }));
+      a.get('/', (c) => c.text('ok'));
+      for (let i = 0; i < 2; i++) await call(a, '/', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // prime the snapshot
+      const res = await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } });
+      expect(res.status).toBe(403);
+      expect(res.headers.get('cache-control')).toBe('no-store');
+    }
+  });
   it('blocks a listed ip with 403 and blk', async () => {
     const a = await primed();
     const res = await call(a, '/', { headers: { 'cf-connecting-ip': BLOCKED_IP } });
