@@ -12,6 +12,12 @@ now `vercel`.
 
 ### Fixed
 
+- On Deno Deploy (no `Deno.permissions`), `DENO_DEPLOYMENT_ID` is read through `Deno.env.get`
+  instead of being treated as unset, so events flush per row there instead of waiting for a 15 s
+  timer in a short-lived isolate. With the permission API present, a variable not already granted
+  is still never read. (camada-all-wc27)
+- Off Workers with per-row flushing and no execution context (`hono/vercel`), each flush is handed
+  to Vercel's request-context `waitUntil` when one is present, as `@camada/next` does. (camada-all-wc27)
 - The challenge page (served and re-issued after a wrong answer) sends its own
   `Content-Security-Policy` (core's `challengePageCsp()`: only its inline solver and style, by
   hash), and a policy a middleware in front of camada set on `c.res` or with `c.header()` no
