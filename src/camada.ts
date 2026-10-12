@@ -314,17 +314,21 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     }, null);
 
     if (answer) {
-      // The challenge page carries its own policy (camada-all-mwpo). Hono copies the headers of the c.res
-      // an app middleware in front of camada touched onto the response returned here, so its CSP would
-      // replace the page's and block the solver: drop both policy headers from that c.res first.
-      if (answer.headers.has('content-security-policy')) {
-        guarded(() => {
-          const prior = c.res.headers;
-          prior.delete('content-security-policy');
-          prior.delete('content-security-policy-report-only');
-        }, undefined);
-      }
-      return answer;
+      // Hono merges the headers of a c.res an app middleware in front of camada touched (c.res.headers,
+      // or c.header() once anything read c.res) over the response returned here: an upstream
+      // `cache-control: public` would make the IP-bound challenge cacheable, its CSP would block the
+      // solver, its Set-Cookie would replace the `_cch` one. So set c.res to the answer, then put every
+      // header of the answer back on top and drop a report-only policy (camada-all-mwpo, R7-1).
+      return guarded(() => {
+        c.res = answer;
+        const h = c.res.headers;
+        if (h === answer.headers) return answer;   // nothing was merged in
+        for (const [k, v] of answer.headers) if (k !== 'set-cookie') h.set(k, v);
+        const cookies = answer.headers.getSetCookie();
+        if (cookies.length > 0) { h.delete('set-cookie'); for (const ck of cookies) h.append('set-cookie', ck); }
+        h.delete('content-security-policy-report-only');
+        return c.res;
+      }, answer);
     }
 
     // Read the request now, before the app runs: after Deno.upgradeWebSocket it is closed and
