@@ -317,7 +317,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       // Hono merges the headers of a c.res an app middleware in front of camada touched (c.res.headers,
       // or c.header() once anything read c.res) over the response returned here: an upstream
       // `cache-control: public` would make the IP-bound challenge cacheable, its CSP would block the
-      // solver, its Set-Cookie would replace the `_cch` one. So set c.res to the answer, then put every
+      // solver, its Set-Cookie of the same name would replace the `_cch` one. So set c.res to the answer, then put every
       // header of the answer back on top and drop a report-only policy (camada-all-mwpo, R7-1).
       return guarded(() => {
         c.res = answer;
@@ -325,7 +325,14 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         if (h === answer.headers) return answer;   // nothing was merged in
         for (const [k, v] of answer.headers) if (k !== 'set-cookie') h.set(k, v);
         const cookies = answer.headers.getSetCookie();
-        if (cookies.length > 0) { h.delete('set-cookie'); for (const ck of cookies) h.append('set-cookie', ck); }
+        if (cookies.length > 0) {
+          // The answer's cookie wins only on a name clash; the app's own (a session, say) are kept (RF-2).
+          const name = (ck: string) => ck.slice(0, Math.max(ck.indexOf('='), 0)).trim();
+          const ours = new Set(cookies.map(name));
+          const kept = h.getSetCookie().filter((ck) => !ours.has(name(ck)));
+          h.delete('set-cookie');
+          for (const ck of [...kept, ...cookies]) h.append('set-cookie', ck);
+        }
         h.delete('content-security-policy-report-only');
         return c.res;
       }, answer);

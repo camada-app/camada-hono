@@ -543,7 +543,7 @@ describe('challenge', () => {
 
   it("a passed challenge's cookie survives an upstream set-cookie (R7-1)", async () => {
     const a = new Hono();
-    a.use('*', async (c, next) => { c.res.headers.append('set-cookie', 'up=1'); await next(); });
+    a.use('*', async (c, next) => { c.res.headers.append('set-cookie', 'up=1; Path=/'); c.res.headers.append('set-cookie', `${CHALLENGE_COOKIE}=stale; Path=/`); await next(); });
     a.use('*', camada({ env: ENV, fetchImpl }));
     a.get('/cart', (c) => c.html('<p>cart</p>'));
     for (let i = 0; i < 2; i++) await call(a, '/cart', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
@@ -551,7 +551,11 @@ describe('challenge', () => {
     const nonce = nonceOf(await page.text());
     const ok = await postSolution(a, CHALLENGED_IP, `nonce=${nonce}&solution=${solve(nonce)}&to=%2Fcart`);
     expect(ok.status).toBe(302);
-    expect(ok.headers.getSetCookie().some((c) => c.startsWith(`${CHALLENGE_COOKIE}=`))).toBe(true);
+    const cookies = ok.headers.getSetCookie();
+    const cch = cookies.filter((c) => c.startsWith(`${CHALLENGE_COOKIE}=`));
+    expect(cch).toHaveLength(1);                                   // the answer's cookie wins a name clash
+    expect(cch[0]).not.toContain('stale');
+    expect(cookies).toContain('up=1; Path=/');                     // the app's own session cookie is kept (RF-2)
   });
 
   it('challenges on a path rule, not just an ip', async () => {
