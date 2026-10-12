@@ -4,6 +4,9 @@ camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant s
 (your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
 challenge page and beacon, records the outcomes your handlers know (`track()`),
 and ships wire events through `waitUntil` so nothing is on the response path.
+It also runs on `@hono/node-server`, Bun and Deno: there it takes the client from the socket
+peer, and batches events on a timer (one `POST /e` per flush, drained on exit) instead of one
+per request.
 Fails open by design — a camada outage or bug never 5xxes your app.
 
 ```sh
@@ -71,7 +74,13 @@ unprovisioned environment behaves exactly as if camada were not installed.
    counts only on Workers (where Cloudflare sets it and a client cannot forge it, and where
    `request.cf` proves it), and `X-Forwarded-For` counts only under a trusted-proxy config. On
    `@hono/node-server`, Bun or Deno the CF header is ignored — there it is just another header
-   the caller controls.
+   the caller controls. There the client is the socket peer, read from the object the runtime
+   hands Hono as `c.env`: `incoming.socket.remoteAddress` on `@hono/node-server`,
+   `server.requestIP(req)` on `Bun.serve({ fetch: app.fetch })`, `info.remoteAddr` on
+   `Deno.serve(app.fetch)`. With a trusted-proxy config, `X-Forwarded-For` is walked from that
+   peer, as on every other adapter. Anywhere else (a host that hands Hono no such object), pass
+   the `peer` option; without a peer and a trusted proxy the client stays unknown, so IP rules do
+   not match and no challenge is served.
 3. Runs your ordered custom rules (see below), then the allow, block and challenge lists.
 4. **Block** → `403` with `x-block-reason` before your handler; the event still ships, with
    `st: 403` and `blk: <reason>` so the analyst counts SDK blocks apart from your own 403s.
@@ -159,6 +168,7 @@ never challenged (it would mint a cookie any other unidentified client could pre
 | `scriptPath` | `/_cam/b.js` | where the first-party beacon script is served |
 | `fpPath` | `/_cam/fp` | where that script posts the beacon; keep it in `scriptPath`'s directory |
 | `env` | `c.env` | overrides the Worker env (tests) |
+| `peer` | the runtime's socket peer | off Workers: `(c) => string \| null`, the socket address for this request, e.g. `(c) => getConnInfo(c).remote.address` with your runtime's `getConnInfo`. Wins over what camada reads from `c.env`; never consulted on Workers |
 
 `CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
 

@@ -9,7 +9,7 @@ import type { Context, MiddlewareHandler, Next } from 'hono';
 import iife from '@camada/browser/iife-string';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
-  guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody,
+  guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
   CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
@@ -25,7 +25,6 @@ const FP_MAX = 32 * 1024;        // matches the analyst's /fp cap: never accept 
 const SESSION_COOKIE = '_sfp';   // the same session cookie as every other tap: sid/ns stay comparable
 const SESSION_MAX_AGE = 2592000;
 const BODY_MAX = 4 * 1024;       // the verify form is ~120 bytes; anything larger is not ours
-const encoder = new TextEncoder();
 
 export interface Engine {
   env: ResolvedEnv;
@@ -35,6 +34,8 @@ export interface Engine {
 }
 
 export type WaitUntil = (p: Promise<unknown>) => void;
+/** The waitUntil off Workers, where no execution context holds anything open. */
+export const noWait: WaitUntil = () => {};
 
 // One engine per resolved configuration, not per module: a Workers isolate can host several
 // Hono apps, and a shared singleton would enforce the first tenant's snapshot on the second
@@ -89,15 +90,44 @@ const cfOf = (req: Request): CfProps => ((req as Request & { cf?: CfProps }).cf 
 const trustedProxy = (e: Engine): TrustedProxyConfig | null =>
   e.env.trustedProxy ?? e.snap.config?.trusted_proxy ?? null;
 
+/** The socket peer the runtime vouches for, read from the object Hono hands the app as `c.env`
+ *  (no static import of hono/bun etc., so a Workers bundle pulls none of them):
+ *  @hono/node-server `{ incoming }` → `incoming.socket.remoteAddress`; Bun `Bun.serve({ fetch:
+ *  app.fetch })` → the server (or hono/bun's `{ server }`) → `requestIP(req).address`; Deno
+ *  `Deno.serve(app.fetch)` → `info.remoteAddr.hostname`. Null when none of these is there. */
+function runtimePeer(env: unknown, req: Request): string | null {
+  if (!env || typeof env !== 'object') return null;
+  const e = env as {
+    incoming?: { socket?: { remoteAddress?: unknown } };
+    server?: unknown;
+    requestIP?: unknown;
+    remoteAddr?: { hostname?: unknown };
+  };
+  const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
+  const node = str(e.incoming?.socket?.remoteAddress);
+  if (node) return node;
+  const bun = ('server' in e ? e.server : e) as BunServer | undefined;   // hono/bun's getBunServer
+  if (typeof bun?.requestIP === 'function') return str((bun.requestIP(req) as { address?: unknown } | null)?.address);
+  return str(e.remoteAddr?.hostname);
+}
+
 /** Cloudflare sets `cf-connecting-ip` itself and a client cannot forge it — but only on
  *  Workers, which is also the only place `request.cf` exists. On any other Hono runtime
- *  (node-server, Bun, Deno) that header is attacker-controlled, so it is ignored there and the
- *  trusted-proxy rules decide, exactly as they do for X-Forwarded-For. */
-const clientIp = (e: Engine, req: Request): string | null => {
+ *  (node-server, Bun, Deno) that header is attacker-controlled, so it is ignored there: the
+ *  socket peer (the app's `peer(c)`, else the runtime's own) and X-Forwarded-For go through the
+ *  trusted-proxy rules instead, as on every other adapter. */
+const clientIp = (e: Engine, req: Request, peer: string | null): string | null => {
   const cf = (req as Request & { cf?: unknown }).cf;
-  const direct = cf ? req.headers.get('cf-connecting-ip') : null;
-  return direct || resolveClientIp(null, req.headers.get('x-forwarded-for'), trustedProxy(e));
+  if (cf) return req.headers.get('cf-connecting-ip') || resolveClientIp(null, req.headers.get('x-forwarded-for'), trustedProxy(e));
+  return resolveClientIp(peer, req.headers.get('x-forwarded-for'), trustedProxy(e));
 };
+
+/** The peer for a request off Workers; never consulted where `request.cf` exists. Never throws. */
+const peerOf = (opts: CamadaHonoOptions, c: Context): string | null => guarded(() => {
+  if ((c.req.raw as Request & { cf?: unknown }).cf) return null;
+  if (opts.peer) return opts.peer(c) || null;
+  return runtimePeer(c.env, c.req.raw);
+}, null);
 
 interface RequestFacts {
   url: URL;
@@ -107,10 +137,10 @@ interface RequestFacts {
   sid: string | null;
 }
 
-function describeRequest(e: Engine, req: Request): RequestFacts {
+function describeRequest(e: Engine, req: Request, peer: string | null): RequestFacts {
   const url = new URL(req.url);
   const cookies = req.headers.get('cookie') || '';
-  return { url, path: url.pathname, cf: cfOf(req), ip: clientIp(e, req), sid: cookieValue(cookies, SESSION_COOKIE) };
+  return { url, path: url.pathname, cf: cfOf(req), ip: clientIp(e, req, peer), sid: cookieValue(cookies, SESSION_COOKIE) };
 }
 
 function buildEvent(
@@ -136,18 +166,20 @@ function buildEvent(
   return ev;
 }
 
-/** Push then flush through `waitUntil` — the one rule every row (wire event, beacon, track()) follows. */
+/** Push, then flush through `waitUntil` when there is one (Workers): the isolate may freeze right
+ *  after the response, so each row goes out with it. Off Workers (`noWait`) the process lives on
+ *  and the queue's timer batches the rows — one POST /e per flush, not one per request (core's
+ *  7u3r rule). The one rule every row (wire event, beacon, track()) follows. */
 export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): void {
   e.queue.push(ev);
-  e.queue.flush(waitUntil);
+  if (waitUntil !== noWait) e.queue.flush(waitUntil);
 }
 
 /** 204 and a `sig: 1` row on the event batch — one request per flush at the analyst, not one per page view. */
 async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUntil: WaitUntil): Promise<Response> {
   const noContent = () => new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } });
-  if (Number(req.headers.get('content-length')) > FP_MAX) return new Response(null, { status: 413 });
-  const body = await req.text();
-  if (encoder.encode(body).byteLength > FP_MAX) return new Response(null, { status: 413 });
+  const body = await readBodyCapped(req, FP_MAX);   // streamed: a chunked body cannot buffer past the cap
+  if (body === null) return new Response(null, { status: 413 });
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
@@ -171,9 +203,15 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // Same opt-out as @camada/next: the code option, or CAMADA_CHALLENGE=0 in the Worker env.
     const challengeOn = opts.challenge !== false && env.CAMADA_CHALLENGE !== '0';
 
-    const waitUntil: WaitUntil = (p) => {
-      try { c.executionCtx?.waitUntil(p); } catch { /* no execution context outside a fetch handler */ }
-    };
+    // Hono's executionCtx getter throws where the runtime passed none (node-server, Bun, Deno).
+    let ctx: Context['executionCtx'] | null = null;
+    try { ctx = typeof c.executionCtx?.waitUntil === 'function' ? c.executionCtx : null; } catch { /* expected off Workers: not an error to log */ }
+    const waitUntil: WaitUntil = ctx
+      ? (p) => { try { ctx.waitUntil(p); } catch { /* a context that refuses: the row ships with the next flush */ } }
+      : noWait;
+    // A long-lived process batches on the queue timer, so drain what is queued on exit (core's timer mode does the same).
+    if (!ctx) guarded(() => eng.queue.installNodeExitFlush(), undefined);
+    const peer = peerOf(opts, c);
 
     // The id of the `warn` rule that let this request through, read again after next() when the
     // response event is built (§D3). Every other action settles before the app ever runs.
@@ -187,7 +225,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       eng.snap.ensureFresh(waitUntil);
 
       const req = c.req.raw;
-      const { url, path, cf, ip, sid } = describeRequest(eng, req);
+      const { url, path, cf, ip, sid } = describeRequest(eng, req, peer);
 
       const v = eng.snap.verdict({
         ip, path, ua: req.headers.get('user-agent'),   // §D3: without ua every `ua` rule is false
@@ -258,7 +296,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       return typeof s?.requestIP === 'function' && s.requestIP(req) ? s : null;
     }, null) : null;
     const ev = guarded(() => {
-      const { url, path, ip } = describeRequest(eng, req);
+      const { url, path, ip } = describeRequest(eng, req, peer);
       return buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
     }, null);
 
@@ -367,9 +405,8 @@ async function verify(eng: Engine, req: Request, ip: string, sid: string | null,
   const url = new URL(req.url);
   // camada answers this path before the app runs, so it must not become a place to post
   // hundreds of megabytes at an unauthenticated endpoint.
-  if (Number(req.headers.get('content-length')) > BODY_MAX) return new Response(null, { status: 413 });
-  const body = await req.text();
-  if (body.length > BODY_MAX) return new Response(null, { status: 413 });
+  const body = await readBodyCapped(req, BODY_MAX);
+  if (body === null) return new Response(null, { status: 413 });
   const form = parseFormBody(body);
   const to = safeReturnTo(form.to);
   const now = Date.now();
