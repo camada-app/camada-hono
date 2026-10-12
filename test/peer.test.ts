@@ -196,6 +196,60 @@ describe('flushing off Workers (hono ship(), the 7u3r rule)', () => {
     });
   }
 
+  it('Deno Deploy (no Deno.permissions): DENO_DEPLOYMENT_ID read through Deno.env.get → per-row flush, no beforeExit listener (R4b-1)', async () => {
+    vi.stubGlobal('Deno', { version: { deno: '2.1.0' }, env: { get: (k: string) => (k === 'DENO_DEPLOYMENT_ID' ? 'dep-1' : undefined) } });
+    const before = process.listenerCount('beforeExit');
+    const a = app();
+    await requests(a, 3, runtimes['Deno']!);
+    expect(posts).toBe(3);
+    expect(process.listenerCount('beforeExit')).toBe(before);
+  });
+
+  it('Deno with the permission API: a variable not granted is never read (no prompt), so a Deno server still batches', async () => {
+    let reads = 0;
+    vi.stubGlobal('Deno', {
+      version: { deno: '2.1.0' },
+      permissions: { querySync: () => ({ state: 'prompt' }) },
+      env: { get: () => { reads++; return 'dep-1'; } },
+    });
+    const a = app();
+    await requests(a, 3, runtimes['Deno']!);
+    expect(posts).toBe(0);
+    expect(reads).toBe(0);
+  });
+
+  it('a Deno.env.get that throws reads as unset', async () => {
+    vi.stubGlobal('Deno', { version: { deno: '2.1.0' }, env: { get: () => { throw new Error('NotCapable'); } } });
+    const a = app();
+    await requests(a, 3, runtimes['Deno']!);
+    expect(posts).toBe(0);
+  });
+
+  it("no execution context, not batching, Vercel's request context present: each flush goes to its waitUntil (R4b-3)", async () => {
+    const held: Promise<unknown>[] = [];
+    const key = Symbol.for('@vercel/request-context');
+    (globalThis as Record<symbol, unknown>)[key] = { get: () => ({ waitUntil: (p: Promise<unknown>) => { held.push(p); } }) };
+    try {
+      const a = app();
+      await requests(a, 2, null);   // hono/vercel handle(app): no env, no executionCtx
+      expect(posts).toBe(2);
+      expect(held.length).toBeGreaterThanOrEqual(2);
+      await Promise.all(held);
+    } finally { delete (globalThis as Record<symbol, unknown>)[key]; }
+  });
+
+  it('a batching node server never hands its flush to a request context', async () => {
+    const held: Promise<unknown>[] = [];
+    const key = Symbol.for('@vercel/request-context');
+    (globalThis as Record<symbol, unknown>)[key] = { get: () => ({ waitUntil: (p: Promise<unknown>) => { held.push(p); } }) };
+    try {
+      const a = app();
+      await requests(a, 2, runtimes['node-server']!);
+      expect(posts).toBe(0);
+      expect(held).toHaveLength(0);
+    } finally { delete (globalThis as Record<symbol, unknown>)[key]; }
+  });
+
   it("mode: 'timer' batches even where no server shape is recognised", async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const a = app({ mode: 'timer' });
