@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+Needs the `@camada/core` that exports `readBodyCapped`.
+
+### Fixed
+
+- A chunked (length-less) POST to `/_cam/fp` or the challenge path is cut off at the 32 KB / 4 KB
+  cap and its stream cancelled, instead of being read whole before the cap was checked (an
+  unauthenticated memory DoS). The challenge cap now counts bytes, not UTF-16 units
+  (camada-all-4u4i).
+- On `@hono/node-server`, Bun and Deno the client address is the socket peer (from the runtime
+  object on `c.env`), under the trusted-proxy rules. It was always null there under the default
+  `none`: no IP rule matched and no challenge was served (camada-all-kri7).
+- Off Workers (no execution context), events no longer POST `/e` once per request: they batch on
+  the queue timer and drain on process exit. On Workers every row still flushes through
+  `waitUntil`.
+
+### Added
+
+- `peer` option: `(c) => string | null`, the socket peer on a host camada does not read itself
+  (camada-all-kri7).
+
 ## 0.3.3 (2026-10-09; follows 0.3.2)
 
 Needs `@camada/core` 0.5.1.
