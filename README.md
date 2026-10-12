@@ -6,7 +6,10 @@ challenge page and beacon, records the outcomes your handlers know (`track()`),
 and ships wire events through `waitUntil` so nothing is on the response path.
 It also runs on `@hono/node-server`, Bun and Deno: there it takes the client from the socket
 peer, and batches events on a timer (one `POST /e` per flush, drained on exit) instead of one
-per request.
+per request. On a serverless host without an execution context (`hono/vercel`, `hono/netlify`,
+`hono/aws-lambda`, `hono/lambda-edge`, or any of these with `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`,
+`NETLIFY` or `DENO_DEPLOYMENT_ID` set) every event still flushes as it is shipped, since the
+function freezes after the response; see the `mode` option.
 Fails open by design — a camada outage or bug never 5xxes your app.
 
 ```sh
@@ -168,7 +171,17 @@ never challenged (it would mint a cookie any other unidentified client could pre
 | `scriptPath` | `/_cam/b.js` | where the first-party beacon script is served |
 | `fpPath` | `/_cam/fp` | where that script posts the beacon; keep it in `scriptPath`'s directory |
 | `env` | `c.env` | overrides the Worker env (tests) |
+| `mode` | detected | off Workers only: `'timer'` batches events on a 15 s timer and drains them on exit (a long-lived server); `'lazy'` flushes every event as it is shipped (a function that freezes after the response). Unset: `'timer'` on a recognised `@hono/node-server` / `Bun.serve` / `Deno.serve` server with none of `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`, `DENO_DEPLOYMENT_ID` set, else `'lazy'`. `CAMADA_SERVERLESS=1` forces `'lazy'`. With an execution context (Workers) every event flushes through `waitUntil` |
 | `peer` | the runtime's socket peer | off Workers: `(c) => string \| null`, the socket address for this request, e.g. `(c) => getConnInfo(c).remote.address` with your runtime's `getConnInfo`. Wins over what camada reads from `c.env`; never consulted on Workers |
+
+`CAMADA_TRUSTED_PROXY` sets `trustedProxy` from the env. With neither set, it defaults to `vercel`
+where `VERCEL` is set (Vercel rewrites `X-Forwarded-For`, so its rightmost entry is the client),
+else to the tenant's server config. Behind any other proxy or load balancer off Workers, set it:
+without it the client is the proxy's address.
+
+A body over the cap at `/_cam/fp` (32 KB) or the challenge path (4 KB) is refused with `413`; on
+`@hono/node-server` the client may see a connection reset instead, since the server stops reading
+the upload.
 
 `CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
 
