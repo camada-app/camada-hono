@@ -32,3 +32,5 @@ jobs:
         working-directory: camada-hono
       - run: npm test
         working-directory: camada-hono
+      - run: npx -y @arethetypeswrong/cli@0.18.5 --pack .
+        working-directory: camada-hono

@@ -37,6 +37,10 @@ now `vercel`.
 - `mode` option: `'timer'` (batch, drain on exit) or `'lazy'` (flush per row) off Workers; detected
   when unset (camada-all-wc27).
 
+### Changed
+
+- The `exports` map now gives `require` its own `.d.cts` declarations (`import` and `require` each carry a `types` condition), so a CommonJS TypeScript app on `moduleResolution: node16` compiles; CI runs `@arethetypeswrong/cli`. (camada-all-vuzm)
+
 ## 0.3.3 (2026-10-09; follows 0.3.2)
 
 Needs `@camada/core` 0.5.1.
