@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { Hono } from 'hono';
+import { Hono, type Context } from 'hono';
 import { CHALLENGE_COOKIE } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { camada, resetCamada, track, scriptTag, type CamadaHonoOptions } from '../src/index.js';
@@ -458,6 +458,37 @@ describe('challenge', () => {
     const cookie = ok.headers.get('set-cookie')!.split(';')[0];
     const after = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, cookie, ...HTML } });
     expect(after.status).toBe(200);
+  });
+
+  it('sends the page with its own CSP, matching its inline script and style, and drops one set upstream (camada-all-mwpo)', async () => {
+    const sha = (t: string) => `'sha256-${createHash('sha256').update(t, 'utf8').digest('base64')}'`;
+    const check = (res: Response, html: string) => {
+      expect(res.headers.get('content-security-policy')).toBe(
+        `default-src 'none'; script-src ${sha(/<script>([\s\S]*?)<\/script>/.exec(html)![1])}; ` +
+        `style-src ${sha(/<style>([\s\S]*?)<\/style>/.exec(html)![1])}; base-uri 'none'; frame-ancestors 'self'`);
+      expect(res.headers.get('content-security-policy-report-only')).toBeNull();
+    };
+    // Two ways an app's middleware in front of camada sets a policy: c.header() (prepared headers)
+    // and c.res.headers (Hono merges the old c.res's headers into the one a middleware returns).
+    for (const upstream of [
+      (c: Context) => { c.header('content-security-policy', "default-src 'self'"); c.header('content-security-policy-report-only', "script-src 'none'"); },
+      (c: Context) => { c.res.headers.set('content-security-policy', "default-src 'self'"); c.res.headers.set('content-security-policy-report-only', "script-src 'none'"); c.res.headers.set('x-app', '1'); },
+    ]) {
+      const a = new Hono();
+      a.use('*', async (c, next) => { upstream(c); await next(); });
+      a.use('*', camada({ env: ENV, fetchImpl }));
+      a.get('/cart', (c) => c.html('<p>cart</p>'));
+      a.post('/__camada/challenge', (c) => c.text('unreachable'));
+      for (let i = 0; i < 2; i++) await call(a, '/cart', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // prime the snapshot
+      const page = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, ...HTML } });
+      expect(page.status).toBe(403);
+      check(page, await page.text());
+      const again = await postSolution(a, CHALLENGED_IP, 'nonce=x&solution=1&to=%2Fcart');   // a wrong answer re-issues the page
+      expect(again.status).toBe(403);
+      check(again, await again.text());
+      const ok = await call(a, '/cart', { headers: { 'cf-connecting-ip': '8.8.8.8', ...HTML } });
+      expect(ok.headers.get('content-security-policy')).toBe("default-src 'self'");   // the app's own pages keep the app's policy
+    }
   });
 
   it('challenges on a path rule, not just an ip', async () => {

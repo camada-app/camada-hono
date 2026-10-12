@@ -157,6 +157,12 @@ status it can act on, not a page it cannot solve.
 The nonce and the cookie are bound to the client IP, so a request camada cannot identify is
 never challenged (it would mint a cookie any other unidentified client could present).
 
+The page sends its own `Content-Security-Policy`, allowing only its inline script and style by
+`sha256` hash, and drops any `Content-Security-Policy(-Report-Only)` a middleware in front of
+camada put on `c.res` or `c.header()`. A middleware that sets its policy *after* `await next()`
+(`secureHeaders({ contentSecurityPolicy })`) overwrites the page's and blocks the solver, so
+register `camada()` before it: a challenged request then never reaches it.
+
 ## Options
 
 | option | default | meaning |

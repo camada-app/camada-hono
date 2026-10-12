@@ -9,7 +9,7 @@ import type { Context, MiddlewareHandler, Next } from 'hono';
 import iife from '@camada/browser/iife-string';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
-  guarded, createChallengeAsync, challengePage, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
+  guarded, createChallengeAsync, challengePage, challengePageCsp, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
   CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
@@ -301,7 +301,19 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       return null;
     }, null);
 
-    if (answer) return answer;
+    if (answer) {
+      // The challenge page carries its own policy (camada-all-mwpo). Hono copies the headers of the c.res
+      // an app middleware in front of camada touched onto the response returned here, so its CSP would
+      // replace the page's and block the solver: drop both policy headers from that c.res first.
+      if (answer.headers.has('content-security-policy')) {
+        guarded(() => {
+          const prior = c.res.headers;
+          prior.delete('content-security-policy');
+          prior.delete('content-security-policy-report-only');
+        }, undefined);
+      }
+      return answer;
+    }
 
     // Read the request now, before the app runs: after Deno.upgradeWebSocket it is closed and
     // reading its headers throws. `vars` is null only when the guard above threw before setting
@@ -418,7 +430,7 @@ async function serve(eng: Engine, req: Request, ip: string, sid: string | null, 
   const html = challengePage({ nonce: await eng.kit.nonce(ip, Date.now()), action, to: safeReturnTo(target) });
   return new Response(html, {
     status: 403,
-    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-camada-challenge': '1' },
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'x-camada-challenge': '1', 'content-security-policy': challengePageCsp() },
   });
 }
 
@@ -434,7 +446,7 @@ async function verify(eng: Engine, req: Request, ip: string, sid: string | null,
   const now = Date.now();
   if (!(await eng.kit.verify(ip, now, form.nonce, form.solution))) {
     const html = challengePage({ nonce: await eng.kit.nonce(ip, now), action, to });
-    return new Response(html, { status: 403, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' } });
+    return new Response(html, { status: 403, headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store', 'content-security-policy': challengePageCsp() } });
   }
   const ev = buildEvent(req, url.pathname, '', ip, sid);
   ev.st = 200;
