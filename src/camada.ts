@@ -278,7 +278,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         if (v.rule) ev.rl = v.rule;
         ship(eng, ev, waitUntil);
         const headers: Record<string, string> = {
-          'content-type': 'text/plain', 'x-block-reason': String(v.reason ?? ''), 'x-block-version': v.version ?? '',
+          'content-type': 'text/plain', 'cache-control': 'no-store', 'x-block-reason': String(v.reason ?? ''), 'x-block-version': v.version ?? '',
         };
         if (v.rule) headers['x-block-rule'] = v.rule;   // a custom rule blocked: name it, so the customer knows which row to edit
         return new Response('Forbidden', { status: 403, headers });

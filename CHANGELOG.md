@@ -12,6 +12,7 @@ now `vercel`.
 
 ### Fixed
 
+- Block responses (path, ip, asn, country, tls and rule blocks, the `Forbidden` 403) now send `cache-control: no-store`, like the challenge answers, so a shared cache cannot serve one visitor's block to others. An upstream `cache-control` on `c.res` is replaced. (camada-all-8lp6)
 - Every answer camada gives itself (challenge page, re-issued page, JSON 403, beacon script) keeps
   its own headers when a middleware in front of camada set some through `c.res.headers` (or
   `c.header()` after anything read `c.res`). Hono merged those over the answer, so an upstream
