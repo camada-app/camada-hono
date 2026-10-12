@@ -12,6 +12,12 @@ now `vercel`.
 
 ### Fixed
 
+- The challenge page (served and re-issued after a wrong answer) sends its own
+  `Content-Security-Policy` (core's `challengePageCsp()`: only its inline solver and style, by
+  hash), and a policy a middleware in front of camada set on `c.res` or with `c.header()` no
+  longer rides along on it, where a strict policy blocked the solver. Register `camada()` before
+  `secureHeaders({ contentSecurityPolicy })`, which sets its policy after the response.
+  (camada-all-mwpo)
 - A chunked (length-less) POST to `/_cam/fp` or the challenge path is cut off at the 32 KB / 4 KB
   cap and its stream cancelled, instead of being read whole before the cap was checked (an
   unauthenticated memory DoS). The client sees `413`, or a connection reset on `@hono/node-server`,
