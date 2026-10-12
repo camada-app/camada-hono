@@ -4,23 +4,38 @@
 
 Needs the `@camada/core` that exports `readBodyCapped`.
 
+**Upgrade note.** Off Workers the client address is now the socket peer. Behind a proxy or load
+balancer that address is the proxy's, on every request, where it used to be null under the
+default trusted-proxy `none`. Set `CAMADA_TRUSTED_PROXY` (`hops:N` or `cidrs:…`) so the client is
+read from `X-Forwarded-For`. Where `VERCEL` is set and nothing else is configured, the default is
+now `vercel`.
+
 ### Fixed
 
 - A chunked (length-less) POST to `/_cam/fp` or the challenge path is cut off at the 32 KB / 4 KB
   cap and its stream cancelled, instead of being read whole before the cap was checked (an
-  unauthenticated memory DoS). The challenge cap now counts bytes, not UTF-16 units
+  unauthenticated memory DoS). The client sees `413`, or a connection reset on `@hono/node-server`,
+  which stops reading the upload. The challenge cap now counts bytes, not UTF-16 units
   (camada-all-4u4i).
 - On `@hono/node-server`, Bun and Deno the client address is the socket peer (from the runtime
   object on `c.env`), under the trusted-proxy rules. It was always null there under the default
   `none`: no IP rule matched and no challenge was served (camada-all-kri7).
-- Off Workers (no execution context), events no longer POST `/e` once per request: they batch on
-  the queue timer and drain on process exit. On Workers every row still flushes through
-  `waitUntil`.
+- On a long-lived `@hono/node-server`, Bun or Deno server, events no longer POST `/e` once per
+  request: they batch on the queue timer and drain on process exit. Serverless hosts without an
+  execution context (`hono/vercel`, `netlify`, `aws-lambda`, `lambda-edge`, or `VERCEL`,
+  `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`, `DENO_DEPLOYMENT_ID` set, or `CAMADA_SERVERLESS=1`) still
+  flush every row as it is shipped and get no exit handlers. On Workers every row still flushes
+  through `waitUntil` (camada-all-wc27).
+- The runtime's socket peer is read only on its own runtime and never where an execution context
+  exists, so a Workers binding named `server` or `incoming` is never called as a server.
+- `trustedProxy` defaults to `vercel` where `VERCEL` is set and nothing else is configured.
 
 ### Added
 
 - `peer` option: `(c) => string | null`, the socket peer on a host camada does not read itself
   (camada-all-kri7).
+- `mode` option: `'timer'` (batch, drain on exit) or `'lazy'` (flush per row) off Workers; detected
+  when unset (camada-all-wc27).
 
 ## 0.3.3 (2026-10-09; follows 0.3.2)
 

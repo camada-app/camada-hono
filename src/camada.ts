@@ -14,7 +14,7 @@ import {
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { withSetCookie, withRid } from '@camada/core/fetch';
-import { resolveEnv, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
+import { resolveEnv, hostVar, type CamadaHonoOptions, type ResolvedEnv } from './env.js';
 import { VAR, beaconEnabled, type CamadaVars } from './context.js';
 import { SDK_ID } from './version.js';
 
@@ -34,8 +34,11 @@ export interface Engine {
 }
 
 export type WaitUntil = (p: Promise<unknown>) => void;
-/** The waitUntil off Workers, where no execution context holds anything open. */
-export const noWait: WaitUntil = () => {};
+/** Off Workers in a long-lived process: nothing to hold open, and the queue timer batches the rows. */
+const noWait: WaitUntil = () => {};
+/** Off Workers in a function that freezes after the response: nothing to hold open either, but
+ *  every row flushes as it is shipped — a row left for the timer would never go out. */
+const flushNow: WaitUntil = () => {};
 
 // One engine per resolved configuration, not per module: a Workers isolate can host several
 // Hono apps, and a shared singleton would enforce the first tenant's snapshot on the second
@@ -90,25 +93,41 @@ const cfOf = (req: Request): CfProps => ((req as Request & { cf?: CfProps }).cf 
 const trustedProxy = (e: Engine): TrustedProxyConfig | null =>
   e.env.trustedProxy ?? e.snap.config?.trusted_proxy ?? null;
 
-/** The socket peer the runtime vouches for, read from the object Hono hands the app as `c.env`
- *  (no static import of hono/bun etc., so a Workers bundle pulls none of them):
- *  @hono/node-server `{ incoming }` → `incoming.socket.remoteAddress`; Bun `Bun.serve({ fetch:
- *  app.fetch })` → the server (or hono/bun's `{ server }`) → `requestIP(req).address`; Deno
- *  `Deno.serve(app.fetch)` → `info.remoteAddr.hostname`. Null when none of these is there. */
-function runtimePeer(env: unknown, req: Request): string | null {
-  if (!env || typeof env !== 'object') return null;
-  const e = env as {
-    incoming?: { socket?: { remoteAddress?: unknown } };
-    server?: unknown;
-    requestIP?: unknown;
-    remoteAddr?: { hostname?: unknown };
-  };
+const runtime = globalThis as { Bun?: unknown; Deno?: unknown; navigator?: { userAgent?: string }; process?: { versions?: { node?: string } } };
+const onWorkers = (): boolean => runtime.navigator?.userAgent === 'Cloudflare-Workers';
+
+/** The long-lived server Hono runs under, recognised from the object it hands the app as `c.env`
+ *  (no static import of hono/bun etc., so a Workers bundle pulls none of them), and a reader for
+ *  the socket peer it vouches for. Each shape is read only on its own runtime, so a Workers
+ *  binding that happens to be named `server` or `incoming` (a JS-RPC stub answers any property
+ *  with a callable) is never called:
+ *  @hono/node-server `{ incoming }` → `incoming.socket.remoteAddress` (Node or Bun, not Workers);
+ *  Bun `Bun.serve({ fetch: app.fetch })` → the server (or hono/bun's `{ server }`) →
+ *  `requestIP(req).address`; Deno `Deno.serve(app.fetch)` → `info.remoteAddr.hostname`.
+ *  Null for anything else: Workers bindings, hono/vercel, netlify, aws-lambda, lambda-edge. */
+function serverShape(env: unknown): ((req: Request) => string | null) | null {
+  if (!env || typeof env !== 'object' || onWorkers()) return null;
+  const e = env as { incoming?: { socket?: { remoteAddress?: unknown } }; server?: unknown; remoteAddr?: { hostname?: unknown } };
   const str = (v: unknown): string | null => (typeof v === 'string' && v ? v : null);
-  const node = str(e.incoming?.socket?.remoteAddress);
-  if (node) return node;
-  const bun = ('server' in e ? e.server : e) as BunServer | undefined;   // hono/bun's getBunServer
-  if (typeof bun?.requestIP === 'function') return str((bun.requestIP(req) as { address?: unknown } | null)?.address);
-  return str(e.remoteAddr?.hostname);
+  if (runtime.process?.versions?.node && e.incoming && typeof e.incoming === 'object') return () => str(e.incoming?.socket?.remoteAddress);
+  if (runtime.Bun !== undefined) {
+    const bun = ('server' in e ? e.server : e) as BunServer | undefined;   // hono/bun's getBunServer
+    if (typeof bun?.requestIP === 'function') return (req) => str((bun.requestIP(req) as { address?: unknown } | null)?.address);
+  }
+  if (runtime.Deno !== undefined && e.remoteAddr && typeof e.remoteAddr === 'object') return () => str(e.remoteAddr?.hostname);
+  return null;
+}
+
+/** Serverless hosts whose functions freeze after the response, whatever object they hand `c.env`. */
+const SERVERLESS_HOSTS = ['VERCEL', 'AWS_LAMBDA_FUNCTION_NAME', 'NETLIFY', 'DENO_DEPLOYMENT_ID'];
+
+/** Whether rows wait for the queue timer (a process that outlives the response) rather than
+ *  each flushing as it is shipped. Only where there is no execution context to hold open. */
+function batches(opts: CamadaHonoOptions, env: Record<string, string | undefined>, runtimeEnv: unknown): boolean {
+  if (hostVar('CAMADA_SERVERLESS', env) === '1') return false;
+  if (opts.mode) return opts.mode === 'timer';
+  if (SERVERLESS_HOSTS.some((k) => hostVar(k, env))) return false;
+  return serverShape(runtimeEnv) !== null;
 }
 
 /** Cloudflare sets `cf-connecting-ip` itself and a client cannot forge it — but only on
@@ -122,11 +141,12 @@ const clientIp = (e: Engine, req: Request, peer: string | null): string | null =
   return resolveClientIp(peer, req.headers.get('x-forwarded-for'), trustedProxy(e));
 };
 
-/** The peer for a request off Workers; never consulted where `request.cf` exists. Never throws. */
-const peerOf = (opts: CamadaHonoOptions, c: Context): string | null => guarded(() => {
-  if ((c.req.raw as Request & { cf?: unknown }).cf) return null;
+/** The peer for a request off Workers; never consulted where `request.cf` or an execution
+ *  context exists (a Workers env holds bindings, not a server). Never throws. */
+const peerOf = (opts: CamadaHonoOptions, c: Context, hasCtx: boolean): string | null => guarded(() => {
+  if (hasCtx || (c.req.raw as Request & { cf?: unknown }).cf) return null;
   if (opts.peer) return opts.peer(c) || null;
-  return runtimePeer(c.env, c.req.raw);
+  return serverShape(c.env)?.(c.req.raw) ?? null;
 }, null);
 
 interface RequestFacts {
@@ -166,10 +186,11 @@ function buildEvent(
   return ev;
 }
 
-/** Push, then flush through `waitUntil` when there is one (Workers): the isolate may freeze right
- *  after the response, so each row goes out with it. Off Workers (`noWait`) the process lives on
- *  and the queue's timer batches the rows — one POST /e per flush, not one per request (core's
- *  7u3r rule). The one rule every row (wire event, beacon, track()) follows. */
+/** Push, then flush through `waitUntil` (Workers) or at once (`flushNow`, serverless without an
+ *  execution context): the function may freeze right after the response, so each row goes out
+ *  with it. In a long-lived process (`noWait`) the queue's timer batches the rows — one POST /e per
+ *  flush, not one per request (core's 7u3r rule). The one rule every row (wire event, beacon,
+ *  track()) follows. */
 export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): void {
   e.queue.push(ev);
   if (waitUntil !== noWait) e.queue.flush(waitUntil);
@@ -206,12 +227,13 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // Hono's executionCtx getter throws where the runtime passed none (node-server, Bun, Deno).
     let ctx: Context['executionCtx'] | null = null;
     try { ctx = typeof c.executionCtx?.waitUntil === 'function' ? c.executionCtx : null; } catch { /* expected off Workers: not an error to log */ }
+    const batch = !ctx && guarded(() => batches(opts, env, c.env), false);
     const waitUntil: WaitUntil = ctx
       ? (p) => { try { ctx.waitUntil(p); } catch { /* a context that refuses: the row ships with the next flush */ } }
-      : noWait;
-    // A long-lived process batches on the queue timer, so drain what is queued on exit (core's timer mode does the same).
-    if (!ctx) guarded(() => eng.queue.installNodeExitFlush(), undefined);
-    const peer = peerOf(opts, c);
+      : batch ? noWait : flushNow;
+    // A batching process waits on the queue timer, so drain what is queued on exit (core's timer mode does the same).
+    if (batch) guarded(() => eng.queue.installNodeExitFlush(), undefined);
+    const peer = peerOf(opts, c, ctx !== null);
 
     // The id of the `warn` rule that let this request through, read again after next() when the
     // response event is built (§D3). Every other action settles before the app ever runs.
