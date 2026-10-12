@@ -12,6 +12,14 @@ now `vercel`.
 
 ### Fixed
 
+- Every answer camada gives itself (challenge page, re-issued page, JSON 403, beacon script) keeps
+  its own headers when a middleware in front of camada set some through `c.res.headers` (or
+  `c.header()` after anything read `c.res`). Hono merged those over the answer, so an upstream
+  `cache-control: public, max-age=600` could land on the IP-bound challenge 403 (a shared cache
+  would serve it to others), and an upstream `Set-Cookie` replaced the passed challenge's `_cch`
+  cookie. A report-only policy is still dropped. (camada-all-mwpo)
+- A Deno whose permission API has no `querySync` (before 1.37) no longer reads `Deno.env.get`
+  directly, which could stop the server on a permission prompt. (camada-all-wc27)
 - On Deno Deploy (no `Deno.permissions`), `DENO_DEPLOYMENT_ID` is read through `Deno.env.get`
   instead of being treated as unset, so events flush per row there instead of waiting for a 15 s
   timer in a short-lived isolate. With the permission API present, a variable not already granted

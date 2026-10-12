@@ -491,6 +491,54 @@ describe('challenge', () => {
     }
   });
 
+  it("camada's answers keep their own headers over ones an upstream middleware set (R7-1: no public cache on an IP-bound 403)", async () => {
+    const sha = (t: string) => `'sha256-${createHash('sha256').update(t, 'utf8').digest('base64')}'`;
+    const pageCsp = (html: string) => `default-src 'none'; script-src ${sha(/<script>([\s\S]*?)<\/script>/.exec(html)![1])}; ` +
+      `style-src ${sha(/<style>([\s\S]*?)<\/style>/.exec(html)![1])}; base-uri 'none'; frame-ancestors 'self'`;
+    for (const upstream of [
+      (c: Context) => { c.header('cache-control', 'public, max-age=600'); c.header('content-security-policy', "default-src 'self'"); c.header('content-security-policy-report-only', "script-src 'none'"); },
+      (c: Context) => { c.res.headers.set('cache-control', 'public, max-age=600'); c.res.headers.set('content-security-policy', "default-src 'self'"); c.res.headers.set('content-security-policy-report-only', "script-src 'none'"); },
+    ]) {
+      const a = new Hono();
+      a.use('*', async (c, next) => { upstream(c); await next(); });
+      a.use('*', camada({ env: ENV, fetchImpl }));
+      a.get('/cart', (c) => c.html('<p>cart</p>'));
+      for (let i = 0; i < 2; i++) await call(a, '/cart', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // prime the snapshot
+      const page = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, ...HTML } });
+      expect(page.status).toBe(403);
+      expect(page.headers.get('cache-control')).toBe('no-store');
+      expect(page.headers.get('content-security-policy')).toBe(pageCsp(await page.text()));
+      expect(page.headers.get('content-security-policy-report-only')).toBeNull();
+      const again = await postSolution(a, CHALLENGED_IP, 'nonce=x&solution=1&to=%2Fcart');   // a wrong answer re-issues the page
+      expect(again.status).toBe(403);
+      expect(again.headers.get('cache-control')).toBe('no-store');
+      expect(again.headers.get('content-security-policy')).toBe(pageCsp(await again.text()));
+      expect(again.headers.get('content-security-policy-report-only')).toBeNull();
+      const json = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, accept: 'application/json' } });
+      expect(json.status).toBe(403);
+      expect(json.headers.get('cache-control')).toBe('no-store');
+      expect(json.headers.get('content-type')).toBe('application/json');
+      expect(json.headers.get('content-security-policy-report-only')).toBeNull();
+      const script = await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // the beacon script is camada's answer too
+      expect(script.status).toBe(200);
+      expect(script.headers.get('cache-control')).toBe('public, max-age=3600');
+      expect(script.headers.get('content-type')).toBe('application/javascript');
+    }
+  });
+
+  it("a passed challenge's cookie survives an upstream set-cookie (R7-1)", async () => {
+    const a = new Hono();
+    a.use('*', async (c, next) => { c.res.headers.append('set-cookie', 'up=1'); await next(); });
+    a.use('*', camada({ env: ENV, fetchImpl }));
+    a.get('/cart', (c) => c.html('<p>cart</p>'));
+    for (let i = 0; i < 2; i++) await call(a, '/cart', { headers: { 'cf-connecting-ip': '8.8.8.8' } });
+    const page = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, ...HTML } });
+    const nonce = nonceOf(await page.text());
+    const ok = await postSolution(a, CHALLENGED_IP, `nonce=${nonce}&solution=${solve(nonce)}&to=%2Fcart`);
+    expect(ok.status).toBe(302);
+    expect(ok.headers.getSetCookie().some((c) => c.startsWith(`${CHALLENGE_COOKIE}=`))).toBe(true);
+  });
+
   it('challenges on a path rule, not just an ip', async () => {
     const a = await primed();
     const res = await call(a, '/admin/users', { headers: { 'cf-connecting-ip': '8.8.8.8', ...HTML } });
