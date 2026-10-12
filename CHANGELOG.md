@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.4 (2026-10-12; follows 0.3.3)
 
 Needs the `@camada/core` that exports `readBodyCapped`.
 
