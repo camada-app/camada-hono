@@ -12,6 +12,9 @@ now `vercel`.
 
 ### Fixed
 
+- A camada answer that sets its own cookie (the 302 after a passed challenge, with `_cch`) no
+  longer deletes every Set-Cookie an upstream middleware added: only a cookie of the same name is
+  replaced, so the app's session cookie survives. (camada-all-mwpo)
 - Block responses (path, ip, asn, country, tls and rule blocks, the `Forbidden` 403) now send `cache-control: no-store`, like the challenge answers, so a shared cache cannot serve one visitor's block to others. An upstream `cache-control` on `c.res` is replaced. (camada-all-8lp6)
 - Every answer camada gives itself (challenge page, re-issued page, JSON 403, beacon script) keeps
   its own headers when a middleware in front of camada set some through `c.res.headers` (or
