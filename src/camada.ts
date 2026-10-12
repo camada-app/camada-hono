@@ -40,6 +40,18 @@ const noWait: WaitUntil = () => {};
  *  every row flushes as it is shipped — a row left for the timer would never go out. */
 const flushNow: WaitUntil = () => {};
 
+/** The host's request-scoped waitUntil where Vercel provides one (`@vercel/functions` reads the same
+ *  global; @camada/next's wait-until.ts too): hono/vercel passes no execution context, so without it
+ *  the function may freeze before a flush started at the response is done. Null elsewhere. */
+function requestContextWaitUntil(): WaitUntil | null {
+  return guarded(() => {
+    const g = globalThis as Record<symbol, { get?: () => { waitUntil?: WaitUntil } | undefined } | undefined>;
+    const ctx = g[Symbol.for('@vercel/request-context')]?.get?.();
+    if (typeof ctx?.waitUntil !== 'function') return null;
+    return (p: Promise<unknown>) => { try { ctx.waitUntil!(p); } catch { /* a context that refuses costs only the hold */ } };
+  }, null);
+}
+
 // One engine per resolved configuration, not per module: a Workers isolate can host several
 // Hono apps, and a shared singleton would enforce the first tenant's snapshot on the second
 // and sign its `_cch` cookies with the first tenant's secret. An unconfigured request is never
@@ -186,7 +198,7 @@ function buildEvent(
   return ev;
 }
 
-/** Push, then flush through `waitUntil` (Workers) or at once (`flushNow`, serverless without an
+/** Push, then flush through `waitUntil` (Workers, or Vercel's request context) or at once (`flushNow`, serverless without an
  *  execution context): the function may freeze right after the response, so each row goes out
  *  with it. In a long-lived process (`noWait`) the queue's timer batches the rows — one POST /e per
  *  flush, not one per request (core's 7u3r rule). The one rule every row (wire event, beacon,
@@ -230,7 +242,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const batch = !ctx && guarded(() => batches(opts, env, c.env), false);
     const waitUntil: WaitUntil = ctx
       ? (p) => { try { ctx.waitUntil(p); } catch { /* a context that refuses: the row ships with the next flush */ } }
-      : batch ? noWait : flushNow;
+      : batch ? noWait : requestContextWaitUntil() ?? flushNow;
     // A batching process waits on the queue timer, so drain what is queued on exit (core's timer mode does the same).
     if (batch) guarded(() => eng.queue.installNodeExitFlush(), undefined);
     const peer = peerOf(opts, c, ctx !== null);

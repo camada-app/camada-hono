@@ -182,8 +182,18 @@ register `camada()` before it: a challenged request then never reaches it.
 
 `CAMADA_TRUSTED_PROXY` sets `trustedProxy` from the env. With neither set, it defaults to `vercel`
 where `VERCEL` is set (Vercel rewrites `X-Forwarded-For`, so its rightmost entry is the client),
-else to the tenant's server config. Behind any other proxy or load balancer off Workers, set it:
-without it the client is the proxy's address.
+else to the tenant's server config. Under `VERCEL` that default also wins over the trusted-proxy
+setting in your dashboard: only the `trustedProxy` option or `CAMADA_TRUSTED_PROXY` overrides it.
+Behind any other proxy or load balancer off Workers, set it: without it the client is the proxy's
+address.
+
+On a Deno edge host that sets none of the variables above (Supabase Edge Functions and the like),
+`Deno.serve` looks like a long-lived server and events would wait for the 15 s timer in an isolate
+that may not live that long. Set `mode: 'lazy'` or `CAMADA_SERVERLESS=1` there. Deno Deploy is
+detected through `DENO_DEPLOYMENT_ID`, read with `Deno.env.get` where the permission API is absent.
+On Vercel without an execution context (`hono/vercel`), each flush is handed to Vercel's
+request-context `waitUntil` when the platform provides one, so the function stays up until it is
+sent.
 
 A body over the cap at `/_cam/fp` (32 KB) or the challenge path (4 KB) is refused with `413`; on
 `@hono/node-server` the client may see a connection reset instead, since the server stops reading
