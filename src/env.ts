@@ -1,5 +1,6 @@
 // Workers hand env vars per request on `c.env`, not on a process — so the engine is built from
 // whatever the first request carries, merged with the options the app passed in code.
+import type { Context } from 'hono';
 import { parseKey, parseTrustedProxyEnv, type SnapshotVersion, type TrustedProxyConfig } from '@camada/core';
 
 export interface ResolvedEnv {
@@ -23,6 +24,10 @@ export interface CamadaHonoOptions {
   fpPath?: string;                // where that script posts the beacon (default /_cam/fp; must share scriptPath's directory — the script derives it)
   env?: Record<string, string | undefined>;   // overrides c.env (tests, and apps that read config themselves)
   fetchImpl?: typeof fetch;
+  /** Off Workers: the socket peer for this request, when the runtime object on `c.env` is not
+   *  one camada reads itself (node-server, Bun, Deno) — e.g. `(c) => getConnInfo(c).remote.address`.
+   *  Goes through the trusted-proxy rules with X-Forwarded-For. Never consulted on Workers. */
+  peer?: (c: Context) => string | null | undefined;
 }
 
 const asProxy = (v: CamadaHonoOptions['trustedProxy']): TrustedProxyConfig | null =>
