@@ -377,11 +377,9 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const shipEvent = () => void guardedAsync(async () => {
       if (!ev) return;
       const cfg = eng.snap.config;
-      if (!signalled) {   // a signalled row ships whatever sample and exclude say, like the 403 row it replaces
-        if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x))) return;
-        if (Math.random() >= (cfg?.sample ?? 1)) return;
-      }
+      // a signalled row ships whatever sample and exclude say, like the 403 row it replaces
       if (signalled) ev.chs = 1;
+      else if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
       ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
       ev.st = status;
       ev.dur = Math.max(0, Date.now() - t0);
