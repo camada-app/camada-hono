@@ -82,6 +82,7 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/checkout', (c) => c.html('<p>checkout</p>'));
   a.get('/admin/users', (c) => c.html('<p>admin</p>'));
   a.get('/healthz', (c) => c.text('ok'));
+  a.get('/cc', (c) => c.json({}, 200, { 'cache-control': 'public, max-age=300' }));
   a.get('/stream', () => {
     let i = 0;   // three chunks 40 ms apart: a body that outlives the handler
     return new Response(new ReadableStream({
@@ -529,11 +530,6 @@ describe('challenge', () => {
       expect(again.headers.get('cache-control')).toBe('no-store');
       expect(again.headers.get('content-security-policy')).toBe(pageCsp(await again.text()));
       expect(again.headers.get('content-security-policy-report-only')).toBeNull();
-      const json = await call(a, '/cart', { headers: { 'cf-connecting-ip': CHALLENGED_IP, accept: 'application/json' } });
-      expect(json.status).toBe(403);
-      expect(json.headers.get('cache-control')).toBe('no-store');
-      expect(json.headers.get('content-type')).toBe('application/json');
-      expect(json.headers.get('content-security-policy-report-only')).toBeNull();
       const script = await call(a, '/_cam/b.js', { headers: { 'cf-connecting-ip': '8.8.8.8' } });   // the beacon script is camada's answer too
       expect(script.status).toBe(200);
       expect(script.headers.get('cache-control')).toBe('public, max-age=3600');
@@ -565,11 +561,46 @@ describe('challenge', () => {
     expect(res.headers.get('x-camada-challenge')).toBe('1');
   });
 
-  it('answers 403 JSON for a non-HTML challenge', async () => {
+  it('passes a non-HTML request to the app, signalled, even unsampled or excluded', async () => {
+    CONFIG = { ...BASE_CONFIG, sample: 0, exclude: ['/checkout'] } as typeof CONFIG;
     const a = await primed();
     const res = await call(a, '/checkout', { headers: { 'cf-connecting-ip': '8.8.8.8', accept: 'application/json' } });
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ error: 'challenge_required' });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-camada-challenge')).toBe('1');
+    const rid = res.headers.get('x-rid');
+    expect(rid).toBeTruthy();
+    await vi.waitFor(() => expect(events.find((e) => e.rid === rid)).toMatchObject({ st: 200, chs: 1 }));
+    expect(events.find((e) => e.rid === rid)!.blk).toBeUndefined();
+  });
+
+  it('signals a HEAD request too', async () => {
+    const a = await primed();
+    const res = await call(a, '/checkout', { method: 'HEAD', headers: { 'cf-connecting-ip': '8.8.8.8', accept: 'application/json' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-camada-challenge')).toBe('1');
+    expect(res.headers.get('x-rid')).toBeTruthy();
+  });
+
+  it('forces no-store on a signalled response, HEAD included; an unsignalled one keeps the app\'s (82ar)', async () => {
+    const a = await primed();
+    const h = (ip: string, method = 'GET') => call(a, '/cc', { method, headers: { 'cf-connecting-ip': ip, accept: 'application/json' } });
+    expect((await h(CHALLENGED_IP)).headers.get('cache-control')).toBe('no-store');
+    expect((await h(CHALLENGED_IP, 'HEAD')).headers.get('cache-control')).toBe('no-store');
+    expect((await h('8.8.8.8')).headers.get('cache-control')).toBe('public, max-age=300');
+  });
+
+  it('adds no signal once _cch is valid', async () => {
+    const a = await primed();
+    const page = await call(a, '/checkout', { headers: { 'cf-connecting-ip': CHALLENGED_IP, ...HTML } });
+    const nonce = nonceOf(await page.text());
+    const ok = await postSolution(a, CHALLENGED_IP, `nonce=${nonce}&solution=${solve(nonce)}&to=%2Fcheckout`);
+    const cch = ok.headers.getSetCookie().find((c) => c.startsWith(`${CHALLENGE_COOKIE}=`))!.split(';')[0];
+    events.length = 0;
+    const res = await call(a, '/checkout', { headers: { 'cf-connecting-ip': CHALLENGED_IP, accept: 'application/json', cookie: cch } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-camada-challenge')).toBeNull();
+    await vi.waitFor(() => expect(events.length).toBeGreaterThan(0));
+    expect(events.some((e) => e.chs)).toBe(false);
   });
 
   it('refuses an oversized verify body instead of buffering it', async () => {

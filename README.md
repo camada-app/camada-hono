@@ -151,8 +151,9 @@ work, sets `_cch` (an HMAC token, 1 h, `HttpOnly; SameSite=Lax`) and 302s back t
 URL. Events: `{ st: 403, blk: "challenge" }` when served, `{ st: 200, ch: 1 }` when passed.
 
 Requests that are not HTML navigations (no `text/html` in `Accept`, or a `sec-fetch-dest` other
-than `document`) get `403 {"error":"challenge_required"}` instead — an API client should see a
-status it can act on, not a page it cannot solve.
+than `document`) are not challenged: they pass to your app, the response carries
+`x-camada-challenge: 1` beside `x-rid`, and the event ships with the real status and `chs: 1`
+(unsampled, never excluded). Your frontend may act on the header.
 
 The nonce and the cookie are bound to the client IP, so a request camada cannot identify is
 never challenged (it would mint a cookie any other unidentified client could present).
