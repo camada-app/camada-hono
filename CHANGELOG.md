@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Beacon rows relayed from `/_cam/fp` carry `rts`, the SDK host's receipt time (`Date.now()`, set after the body spread so a browser cannot forge it). The analyst uses it in place of the browser clock for `/e` beacons, so a beacon alone in a batch still joins its request (camada-all-wd3b).
+
 - A signalled response (`x-camada-challenge: 1`) now also sets `cdn-cache-control`,
   `surrogate-control`, `cloudflare-cdn-cache-control`, `vercel-cdn-cache-control` and
   `netlify-cdn-cache-control` to `no-store`, overriding the app's. CDNs read those ahead of
