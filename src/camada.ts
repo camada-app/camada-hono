@@ -220,7 +220,7 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
   // Spread first: the ip and the tap are the server's to say, whatever the body claimed.
-  ship(eng, { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO }, waitUntil);
+  ship(eng, { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO, rts: Date.now() }, waitUntil);
   return noContent();
 }
 
