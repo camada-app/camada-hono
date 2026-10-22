@@ -82,6 +82,7 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/checkout', (c) => c.html('<p>checkout</p>'));
   a.get('/admin/users', (c) => c.html('<p>admin</p>'));
   a.get('/healthz', (c) => c.text('ok'));
+  a.get('/cc', (c) => c.json({}, 200, { 'cache-control': 'public, max-age=300' }));
   a.get('/stream', () => {
     let i = 0;   // three chunks 40 ms apart: a body that outlives the handler
     return new Response(new ReadableStream({
@@ -578,6 +579,14 @@ describe('challenge', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('x-camada-challenge')).toBe('1');
     expect(res.headers.get('x-rid')).toBeTruthy();
+  });
+
+  it('forces no-store on a signalled response, HEAD included; an unsignalled one keeps the app\'s (82ar)', async () => {
+    const a = await primed();
+    const h = (ip: string, method = 'GET') => call(a, '/cc', { method, headers: { 'cf-connecting-ip': ip, accept: 'application/json' } });
+    expect((await h(CHALLENGED_IP)).headers.get('cache-control')).toBe('no-store');
+    expect((await h(CHALLENGED_IP, 'HEAD')).headers.get('cache-control')).toBe('no-store');
+    expect((await h('8.8.8.8')).headers.get('cache-control')).toBe('public, max-age=300');
   });
 
   it('adds no signal once _cch is valid', async () => {
