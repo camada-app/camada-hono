@@ -801,6 +801,16 @@ describe('first-party beacon', () => {
     expect(events[0].st).toBeUndefined();
   });
 
+  it('stamps rts from the relay clock after the body spread (camada-all-wd3b)', async () => {
+    const a = await primed();
+    const before = Date.now();
+    await postBeacon(a, JSON.stringify({ rid: 'abc', tz: 'UTC', rts: 1 }));
+    const rts = events[0].rts as number;
+    expect(Number.isInteger(rts)).toBe(true);
+    expect(rts).toBeGreaterThanOrEqual(before);
+    expect(rts).toBeLessThanOrEqual(Date.now());
+  });
+
   it('joins the beacon to the page event on rid', async () => {
     const a = await primed();
     const html = await (await call(a, '/page', { headers: { 'cf-connecting-ip': '8.8.8.8' } })).text();
