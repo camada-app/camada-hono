@@ -299,8 +299,9 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         }
       }
 
-      // The beacon endpoints come after enforcement (a blocked or challenged client gets neither
-      // the script nor a relay) and before the app (they are camada's, not its) — @camada/node's order.
+      // The beacon endpoints come after enforcement (a blocked client, or one served the challenge
+      // page, gets neither the script nor a relay; a challenged non-HTML client is only signalled
+      // and still reaches them) and before the app (they are camada's, not its) — @camada/node's order.
       if (beaconEnabled(eng)) {
         if (req.method === 'GET' && path === scriptPath) {
           return new Response(iife, { status: 200, headers: { 'content-type': 'application/javascript', 'cache-control': 'public, max-age=3600' } });
