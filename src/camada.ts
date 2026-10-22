@@ -426,7 +426,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       const headers = new Headers(head.headers);
       if (cookie) headers.append('set-cookie', cookie);
       if (rid) headers.set('x-rid', rid);
-      if (signalled) headers.set('x-camada-challenge', '1');
+      if (signalled) { headers.set('x-camada-challenge', '1'); headers.set('cache-control', 'no-store'); }
       replaceRes(c, new Response(null, { status: head.status, statusText: head.statusText, headers }));
     }, undefined);
   };
