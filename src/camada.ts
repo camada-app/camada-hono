@@ -254,6 +254,8 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     // and with its own post-response event. Null when camada answered the request itself.
     let vars: CamadaVars | null = null;
     let newSession = false;
+    // A non-HTML request that passed under a challenge: x-camada-challenge: 1 and chs: 1 (82ar).
+    let signalled = false;
 
     const answer = await guardedAsync(async (): Promise<Response | null> => {
       eng.snap.ensureFresh(waitUntil);
@@ -291,7 +293,9 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         if (req.method === 'POST' && path === challengePath) return verify(eng, req, ip, sid, challengePath, waitUntil);
         const token = cookieValue(req.headers.get('cookie') || '', CHALLENGE_COOKIE);
         if (v.challenge && !(await eng.kit.tokenValid(ip, Date.now(), token))) {
-          return serve(eng, req, ip, sid, challengePath, path + url.search, waitUntil);
+          // Only a page can be challenged; any other request passes to the app, signalled.
+          if (wantsHtml(req.headers.get('accept'), req.headers.get('sec-fetch-dest'))) return serve(eng, req, ip, sid, challengePath, path + url.search, waitUntil);
+          signalled = true;
         }
       }
 
@@ -373,8 +377,11 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const shipEvent = () => void guardedAsync(async () => {
       if (!ev) return;
       const cfg = eng.snap.config;
-      if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x))) return;
-      if (Math.random() >= (cfg?.sample ?? 1)) return;
+      if (!signalled) {   // a signalled row ships whatever sample and exclude say, like the 403 row it replaces
+        if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x))) return;
+        if (Math.random() >= (cfg?.sample ?? 1)) return;
+      }
+      if (signalled) ev.chs = 1;
       ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
       ev.st = status;
       ev.dur = Math.max(0, Date.now() - t0);
@@ -409,17 +416,18 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         const secure = new URL(c.req.raw.url).protocol === 'https:' ? '; Secure' : '';
         cookie = `${SESSION_COOKIE}=${vars.sid}; Path=/; Max-Age=${SESSION_MAX_AGE}; HttpOnly; SameSite=Lax${secure}`;
       }
-      if (!rid && !cookie) return;
+      if (!rid && !cookie) return;   // signalled implies a captured request, so rid is set
       if (method !== 'HEAD') {
         let out = c.res;
         if (cookie) out = withSetCookie(out, cookie);
-        if (rid) out = withRid(out, { rid });
+        if (rid) out = withRid(out, { rid, signalled });
         return replaceRes(c, out);
       }
       const head = new Response(null, c.res);
       const headers = new Headers(head.headers);
       if (cookie) headers.append('set-cookie', cookie);
       if (rid) headers.set('x-rid', rid);
+      if (signalled) headers.set('x-camada-challenge', '1');
       replaceRes(c, new Response(null, { status: head.status, statusText: head.statusText, headers }));
     }, undefined);
   };
@@ -436,7 +444,7 @@ function replaceRes(c: Context, out: Response): void {
   c.res = out;
 }
 
-/** 403 + the proof-of-work page (HTML navigations) or 403 JSON, plus the `blk: "challenge"` event. */
+/** 403 + the proof-of-work page (HTML navigations), plus the `blk: "challenge"` event. */
 async function serve(eng: Engine, req: Request, ip: string, sid: string | null, action: string, target: string, waitUntil: WaitUntil): Promise<Response> {
   const url = new URL(req.url);
   const ev = buildEvent(req, url.pathname, url.search, ip, sid);
@@ -444,12 +452,6 @@ async function serve(eng: Engine, req: Request, ip: string, sid: string | null, 
   ev.blk = 'challenge';
   ship(eng, ev, waitUntil);
 
-  if (!wantsHtml(req.headers.get('accept'), req.headers.get('sec-fetch-dest'))) {
-    return new Response('{"error":"challenge_required"}', {
-      status: 403,
-      headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'x-camada-challenge': '1' },
-    });
-  }
   const html = challengePage({ nonce: await eng.kit.nonce(ip, Date.now()), action, to: safeReturnTo(target) });
   return new Response(html, {
     status: 403,
