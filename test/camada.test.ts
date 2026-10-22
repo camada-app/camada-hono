@@ -82,7 +82,7 @@ function app(opts: CamadaHonoOptions = {}): Hono {
   a.get('/checkout', (c) => c.html('<p>checkout</p>'));
   a.get('/admin/users', (c) => c.html('<p>admin</p>'));
   a.get('/healthz', (c) => c.text('ok'));
-  a.get('/cc', (c) => c.json({}, 200, { 'cache-control': 'public, max-age=300' }));
+  a.get('/cc', (c) => c.json({}, 200, { 'cache-control': 'public, max-age=300', 'cdn-cache-control': 'public, max-age=60', 'surrogate-control': 'max-age=60' }));
   a.get('/stream', () => {
     let i = 0;   // three chunks 40 ms apart: a body that outlives the handler
     return new Response(new ReadableStream({
@@ -587,6 +587,19 @@ describe('challenge', () => {
     expect((await h(CHALLENGED_IP)).headers.get('cache-control')).toBe('no-store');
     expect((await h(CHALLENGED_IP, 'HEAD')).headers.get('cache-control')).toBe('no-store');
     expect((await h('8.8.8.8')).headers.get('cache-control')).toBe('public, max-age=300');
+  });
+
+  it('forces no-store on every CDN cache header of a signalled response, HEAD included; an unsignalled one keeps the app\'s (camada-all-5pog)', async () => {
+    const a = await primed();
+    const h = (ip: string, method = 'GET') => call(a, '/cc', { method, headers: { 'cf-connecting-ip': ip, accept: 'application/json' } });
+    for (const method of ['GET', 'HEAD']) {
+      const sig = await h(CHALLENGED_IP, method);
+      for (const n of ['cache-control', 'cdn-cache-control', 'surrogate-control', 'cloudflare-cdn-cache-control', 'vercel-cdn-cache-control', 'netlify-cdn-cache-control']) expect(sig.headers.get(n), `${method} ${n}`).toBe('no-store');
+    }
+    const plain = await h('8.8.8.8');
+    expect(plain.headers.get('cdn-cache-control')).toBe('public, max-age=60');
+    expect(plain.headers.get('surrogate-control')).toBe('max-age=60');
+    expect(plain.headers.get('vercel-cdn-cache-control')).toBeNull();
   });
 
   it('adds no signal once _cch is valid', async () => {
