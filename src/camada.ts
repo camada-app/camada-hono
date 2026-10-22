@@ -58,6 +58,9 @@ function requestContextWaitUntil(): WaitUntil | null {
 // cached — a warm-up or a differently-keyed mount must not leave the isolate inert for good.
 const engines = new Map<string, Engine>();
 
+/** Per-client signal: no shared cache may keep the copy. CDNs read their own header ahead of cache-control. */
+const NO_STORE_HEADERS = ['cache-control', 'cdn-cache-control', 'surrogate-control', 'cloudflare-cdn-cache-control', 'vercel-cdn-cache-control', 'netlify-cdn-cache-control'];
+
 /** Test/reset hook: drops every cached engine. */
 export function resetCamada(): void {
   for (const e of engines.values()) { e.snap.stop(); e.queue.stop(); }
@@ -426,7 +429,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       const headers = new Headers(head.headers);
       if (cookie) headers.append('set-cookie', cookie);
       if (rid) headers.set('x-rid', rid);
-      if (signalled) { headers.set('x-camada-challenge', '1'); headers.set('cache-control', 'no-store'); }
+      if (signalled) { headers.set('x-camada-challenge', '1'); for (const n of NO_STORE_HEADERS) headers.set(n, 'no-store'); }
       replaceRes(c, new Response(null, { status: head.status, statusText: head.statusText, headers }));
     }, undefined);
   };

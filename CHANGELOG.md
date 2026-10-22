@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- A signalled response (`x-camada-challenge: 1`) now also sets `cdn-cache-control`,
+  `surrogate-control`, `cloudflare-cdn-cache-control`, `vercel-cdn-cache-control` and
+  `netlify-cdn-cache-control` to `no-store`, overriding the app's. CDNs read those ahead of
+  `cache-control`, so an app-set one could still let a shared cache keep the per-client copy.
+  (camada-all-5pog)
+
 ## 0.3.4 (2026-10-12; follows 0.3.3)
 
 Needs the `@camada/core` that exports `readBodyCapped`.
