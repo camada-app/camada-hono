@@ -18,6 +18,31 @@
     "check": "tsc --noEmit"
   },
   "description": "camada SDK for Hono on Cloudflare Workers: snapshot enforcement, first-party challenge and beacon, track() outcomes, waitUntil-flushed event shipping",
+  "homepage": "https://www.camada.app/docs/hono",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/camada-app/camada-hono.git"
+  },
+  "bugs": {
+    "url": "https://github.com/camada-app/camada-hono/issues"
+  },
+  "keywords": [
+    "camada",
+    "hono",
+    "cloudflare-workers",
+    "edge",
+    "bun",
+    "deno",
+    "nodejs",
+    "bot-detection",
+    "bot-protection",
+    "credential-stuffing",
+    "account-takeover",
+    "rate-limiting",
+    "proof-of-work",
+    "ai-scraper",
+    "security"
+  ],
   "exports": {
     ".": {
       "import": {

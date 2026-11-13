@@ -1,5 +1,7 @@
 # @camada/hono
 
+[Hono guide](https://www.camada.app/docs/hono) · [Bot detection](https://www.camada.app/bot-detection) · [Bot signal test](https://www.camada.app/tools/bot-test) · [Pricing](https://www.camada.app/pricing).
+
 camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant snapshot inline
 (your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
 challenge page and beacon, records the outcomes your handlers know (`track()`),
@@ -10,7 +12,7 @@ per request. On a serverless host without an execution context (`hono/vercel`, `
 `hono/aws-lambda`, `hono/lambda-edge`, or any of these with `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`,
 `NETLIFY` or `DENO_DEPLOYMENT_ID` set) every event still flushes as it is shipped, since the
 function freezes after the response; see the `mode` option.
-Fails open by design — a camada outage or bug never 5xxes your app.
+Fails open by design: a camada outage or bug never 5xxes your app.
 
 ```sh
 npm install @camada/hono
@@ -44,7 +46,7 @@ Workers hand env vars to the request, not to a process, so `camada()` builds its
 app.use('*', camada({ key: MY_KEY, ingestUrl: MY_INGEST }));
 ```
 
-## camada-backend (the dogfood mount — contracts §H, SEC-07)
+## camada-backend (the dogfood mount: contracts §H, SEC-07)
 
 Mount it in front of the API, and never in front of health or the Stripe webhook: those must
 answer whatever the snapshot says.
@@ -60,23 +62,23 @@ app.use('/api/*', (c, next) => (OPEN.has(c.req.path) ? next() : guard(c, next)))
 
 Call `camada()` once and reuse the handler. Engines are cached per resolved configuration, so
 mounting the same config twice shares one snapshot poller and one event queue, while two mounts
-with different keys or URLs each get their own — a Workers isolate hosting several Hono apps
+with different keys or URLs each get their own. A Workers isolate hosting several Hono apps
 never enforces one tenant's snapshot on another, nor signs its cookies with another's secret.
 
 Without `CAMADA_KEY` the middleware is inert (one log line, no requests, no enforcement), so an
-unprovisioned environment behaves exactly as if camada were not installed.
+unprovisioned environment behaves as if camada were not installed.
 
 ## What it does per request
 
-1. Refreshes the snapshot off-path through `waitUntil` (lazy mode — no interval timers on an
+1. Refreshes the snapshot off-path through `waitUntil` (lazy mode, with no interval timers on an
    edge runtime). Every poll and event batch carries `x-camada-sdk: @camada/hono/<version>`,
-   and polls ask for snapshot v5 (`x-camada-snapshot: 5`) — the container that carries your
+   and polls ask for snapshot v5 (`x-camada-snapshot: 5`), the container that carries your
    ordered custom rules.
 2. Resolves the client from `cf-connecting-ip`, falling back to `X-Forwarded-For` under your
    tenant's trusted-proxy config. Neither header is ever trusted blindly: `cf-connecting-ip`
    counts only on Workers (where Cloudflare sets it and a client cannot forge it, and where
    `request.cf` proves it), and `X-Forwarded-For` counts only under a trusted-proxy config. On
-   `@hono/node-server`, Bun or Deno the CF header is ignored — there it is just another header
+   `@hono/node-server`, Bun or Deno the CF header is ignored: there it is another header
    the caller controls. There the client is the socket peer, read from the object the runtime
    hands Hono as `c.env`: `incoming.socket.remoteAddress` on `@hono/node-server`,
    `server.requestIP(req)` on `Bun.serve({ fetch: app.fetch })`, `info.remoteAddr` on
@@ -92,7 +94,7 @@ unprovisioned environment behaves exactly as if camada were not installed.
 6. **Challenge** → a `403` proof-of-work page (see below).
 7. Otherwise your handler runs, and the settled response ships one batched, redacted event with
    its real status (Authorization and Cookie values never leave the isolate; credential-looking
-   query values are scrubbed — see `@camada/core`). The event's `ts` is the request start and
+   query values are scrubbed; see `@camada/core`). The event's `ts` is the request start and
    `dur` runs from there to the response: to its last byte for a `text/event-stream` body
    (a client that leaves early ends it), and to the moment your handler returned for anything
    else, which is the time to first byte (for a buffered body, effectively the whole response).
@@ -112,7 +114,7 @@ unprovisioned environment behaves exactly as if camada were not installed.
 ## Custom rules
 
 Your Rules page holds one ordered list per project, and this middleware walks it before the
-allow, block and challenge lists. First match wins — the order *is* the precedence — and each
+allow, block and challenge lists. First match wins (the order *is* the precedence), and each
 rule carries one of four actions:
 
 | action | what the middleware does | on the event |
@@ -124,7 +126,7 @@ rule carries one of four actions:
 
 A skip rule also carries a *record matches* flag, which only the analyst reads: a recorded skip
 is still scored and shows on your dashboard as Allowed, an unrecorded one is dropped before
-scoring. Either way the request passes here, unstamped — the built-in Allow-list is a skip rule
+scoring. Either way the request passes here, unstamped. The built-in Allow-list is a skip rule
 with recording on.
 
 A rule block also names the row that decided, so the response says which rule to edit:
@@ -138,7 +140,7 @@ x-block-rule: cr_4f2a9c1b7e03
 Every condition type enforces at this tap: `ip`, `path`, `ua` and `header` like everywhere else,
 plus the `asn`, `country` and `tlsx` conditions only `request.cf` can judge. A `header`
 condition (`is`, `contains`, `matches`) reads the name case-insensitively, and headers are the
-request plane's alone — the analyst never sees them, so a header rule is enforced by a v5 SDK
+request plane's alone: the analyst never sees them, so a header rule is enforced by a v5 SDK
 like this one or not at all. A project that has not published the v5 container is answered with
 v4 or v3, and the lists in it keep enforcing.
 
@@ -178,7 +180,7 @@ register `camada()` before it: a challenged request then never reaches it.
 | `scriptPath` | `/_cam/b.js` | where the first-party beacon script is served |
 | `fpPath` | `/_cam/fp` | where that script posts the beacon; keep it in `scriptPath`'s directory |
 | `env` | `c.env` | overrides the Worker env (tests) |
-| `mode` | detected | off Workers only: `'timer'` batches events on a 15 s timer and drains them on exit (a long-lived server); `'lazy'` flushes every event as it is shipped (a function that freezes after the response). Unset: `'timer'` on a recognised `@hono/node-server` / `Bun.serve` / `Deno.serve` server with none of `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`, `DENO_DEPLOYMENT_ID` set, else `'lazy'`. `CAMADA_SERVERLESS=1` forces `'lazy'`. With an execution context (Workers) every event flushes through `waitUntil` |
+| `mode` | detected | off Workers only: `'timer'` batches events on a 15 s timer and drains them on exit for a long-lived server. `'lazy'` flushes every event as it ships for a function that freezes after the response. Unset: `'timer'` on a recognised `@hono/node-server` / `Bun.serve` / `Deno.serve` server with none of `VERCEL`, `AWS_LAMBDA_FUNCTION_NAME`, `NETLIFY`, `DENO_DEPLOYMENT_ID` set, else `'lazy'`. `CAMADA_SERVERLESS=1` forces `'lazy'`. With an execution context (Workers) every event flushes through `waitUntil` |
 | `peer` | the runtime's socket peer | off Workers: `(c) => string \| null`, the socket address for this request, e.g. `(c) => getConnInfo(c).remote.address` with your runtime's `getConnInfo`. Wins over what camada reads from `c.env`; never consulted on Workers |
 
 `CAMADA_TRUSTED_PROXY` sets `trustedProxy` from the env. With neither set, it defaults to `vercel`
@@ -216,17 +218,17 @@ app.use('*', camada());
 app.get('/', (c) => c.html(`<html><head>${scriptTag(c)}</head><body>…</body></html>`));
 ```
 
-`scriptTag(c)` returns `<script src="/_cam/b.js?r=<rid>" async></script>` — the `rid` is this
+`scriptTag(c)` returns `<script src="/_cam/b.js?r=<rid>" async></script>`: the `rid` is this
 request's event id, so the analyst joins the beacon to the page view. The middleware serves the
 script at `GET /_cam/b.js` (cacheable, 1 h) and relays `POST /_cam/fp` (≤ 32 KB, answers 204)
-onto the event batch as a `sig: 1` row stamped with the client ip camada resolved — never the
+onto the event batch as a `sig: 1` row stamped with the client ip camada resolved, never the
 one the body claims. Both endpoints sit behind the verdict: a blocked client gets 403 there
 too. The tag is `''` when camada is off for the request or the project turned the beacon off
 in its settings, and the endpoints stand down with it.
 
 Mounting on a prefix (`app.use('/api/*', camada())`) means `/_cam/*` never reaches the
-middleware; move both paths under it — `camada({ scriptPath: '/api/_cam/b.js', fpPath:
-'/api/_cam/fp' })` — the script derives the post path from its own `src`, so the two must
+middleware; move both paths under it (`camada({ scriptPath: '/api/_cam/b.js', fpPath:
+'/api/_cam/fp' })`). The script derives the post path from its own `src`, so the two must
 share a directory.
 
 ## App-context events
@@ -244,7 +246,7 @@ app.post('/login', async (c) => {
 ```
 
 `track(c, event, { user? })` ships `{ et, uid, rid, sid, ip, ts }` joined to this request's event.
-The user identifier is HMAC-hashed in-process with the ingest token — the raw value never leaves
+The user identifier is HMAC-hashed in-process with the ingest token: the raw value never leaves
 the isolate. It never throws and is a no-op where the middleware did not run. The event name is
 free-form; the analyst's rules read this vocabulary:
 
@@ -260,7 +262,7 @@ free-form; the analyst's rules read this vocabulary:
 ## What this tap can see
 
 `request.cf` gives Workers the client's `asn`, `country`, `tlsClientExtensionsSha1` and
-`httpProtocol`, so ASN, country and TLS-fingerprint rules genuinely enforce here — unlike a bare
+`httpProtocol`, so ASN, country and TLS-fingerprint rules enforce here, unlike a bare
 Node app, which sees none of them. The connection terminates at Cloudflare, so the protocol on
 the event is the visitor's own, not a proxy hop's (camada never reads a forwarded protocol
 header for it). With the beacon and `track()` it is the full in-app position. workerd
@@ -270,3 +272,13 @@ normalises header order, so the raw-wire-order signal is the one thing not avail
 
 Every entry point runs inside camada's guard. A dead ingest, a corrupt snapshot, a bug in this
 package: telemetry is lost, the request is not.
+
+## Docs and links
+
+Read the Hono and Workers guides on [camada.app](https://www.camada.app/docs).
+
+- [Hono guide](https://www.camada.app/docs/hono): mount `@camada/hono` on Cloudflare Workers, Node, Bun, or Deno.
+- [Custom rules](https://www.camada.app/docs/rules) and [Challenge](https://www.camada.app/docs/challenge): match ASN, country, TLS, or headers at the edge.
+- [Bot detection](https://www.camada.app/bot-detection): see how snapshots, beacons, and `track()` catch bots.
+- [Bot signal test](https://www.camada.app/tools/bot-test): check live browser, HTTP, and TLS signals from your client.
+- [Pricing](https://www.camada.app/pricing): compare the free tier and paid plans.
