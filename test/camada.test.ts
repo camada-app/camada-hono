@@ -807,8 +807,8 @@ describe('first-party beacon', () => {
       ...Object.fromEntries(REQUEST_ROW_KEYS.map((k) => [k, 'forged'])),
       rid: 'abc', tz: 'UTC', ip: '1.1.1.1', tap: 'proxy',
     };
+    expect(REQUEST_ROW_KEYS.length).toBeGreaterThan(0);   // an empty import would pass vacuously
     await postBeacon(a, JSON.stringify(body));
-    expect(REQUEST_ROW_KEYS.length).toBeGreaterThan(0);
     expect(events).toHaveLength(1);
     for (const k of REQUEST_ROW_KEYS) expect(Object.hasOwn(events[0], k), k).toBe(false);
     expect(events[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-hono' });

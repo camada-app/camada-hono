@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Beacon rows relayed from `/_cam/fp` drop every browser-supplied request-row key (`REQUEST_ROW_KEYS`, including `st`, `blk`, `uid`, `sid`, `asn`, `cc`), as `@camada/node` and `@camada/next` already do, so visitors cannot forge those fields (camada-all-peph).
+- The `/_cam/fp` beacon relay drops every `REQUEST_ROW_KEYS` field (`st`, `blk`, `uid`, …) from the browser body, as `@camada/node` and `@camada/next` already do, so a visitor cannot forge them (camada-all-peph).
 
 ## 0.4.0 (2026-10-26; follows 0.3.4)
 
