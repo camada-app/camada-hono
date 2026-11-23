@@ -5,7 +5,7 @@
 camada for [Hono](https://hono.dev) on Cloudflare Workers: enforces the tenant snapshot inline
 (your ordered custom rules, then block, allow, challenge), serves a first-party proof-of-work
 challenge page and beacon, records the outcomes your handlers know (`track()`),
-and ships wire events through `waitUntil` so nothing is on the response path.
+and ships wire events through `waitUntil` so delivery can outlive the response.
 It also runs on `@hono/node-server`, Bun and Deno: there it takes the client from the socket
 peer, and batches events on a timer (one `POST /e` per flush, drained on exit) instead of one
 per request. On a serverless host without an execution context (`hono/vercel`, `hono/netlify`,
@@ -93,9 +93,10 @@ unprovisioned environment behaves as if camada were not installed.
    inside a blocked CIDR or ASN goes through).
 6. **Challenge** → a `403` proof-of-work page (see below).
 7. Otherwise your handler runs, and the settled response ships one batched, redacted event with
-   its real status (Authorization and Cookie values never leave the isolate; credential-looking
-   query values are scrubbed; see `@camada/core`). The event's `ts` is the request start and
-   `dur` runs from there to the response: to its last byte for a `text/event-stream` body
+   its real status. By default, only the Authorization scheme is sent. With the opt-in `tokenHash`, a
+   keyed hash of the credential also ships as `tk`. The credential and Cookie values stay in the
+   isolate. Credential-looking query values are scrubbed (see `@camada/core`). The event's `ts`
+   is the request start and `dur` runs from there to the response: to its last byte for a `text/event-stream` body
    (a client that leaves early ends it), and to the moment your handler returned for anything
    else, which is the time to first byte (for a buffered body, effectively the whole response).
    camada sends your handler's Response object itself. It only re-wraps an event-stream body,
@@ -205,6 +206,22 @@ the upload.
 `CAMADA_CHALLENGE=0` in the Worker env switches the challenge off without a code change.
 
 `CAMADA_DISABLED=1` in the Worker env switches everything off, checked per request.
+
+## Credential hash (opt-in, off by default)
+
+Set `tokenHash: true` or `CAMADA_TOKEN_HASH=1` to send `tk` on request events with a usable
+credential. An explicit `tokenHash: false` wins over the env. `tk` is the first 32 hex characters
+of HMAC-SHA256, keyed with your ingest token, over `tok:` plus the credential. The credential is
+the part of `Authorization` after the scheme (for example, the Bearer token), or the whole
+value when there is no scheme. Set `tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER` to use
+that header's whole value when it gives a usable credential. Otherwise, the SDK falls back
+to `Authorization`. The credential itself never leaves the process. A value shorter than 8
+characters or outside printable ASCII sends no `tk`.
+
+camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
+credentials are random tokens or API keys. Leave it off for human passwords over Basic auth.
+Anyone holding both your events and your ingest token could test password guesses against the
+hash. Rotating the ingest token changes every `tk`.
 
 ## The first-party beacon
 

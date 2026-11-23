@@ -8,9 +8,9 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import iife from '@camada/browser/iife-string';
 import {
-  SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
+  SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, logRateLimited, guardedAsync, onBodyDone, requestTokenHash,
   guarded, createChallengeAsync, challengePage, challengePageCsp, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
-  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
+  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO, tokenHashKey, warnIgnoredTokenHeader,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { withSetCookie, withRid } from '@camada/core/fetch';
@@ -74,7 +74,8 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     return null;
   }
   const snapshotVersion = opts.snapshotVersion ?? DEFAULT_SNAPSHOT_VERSION;
-  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${snapshotVersion}`;
+  const cfg = env.tokenHash;
+  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${snapshotVersion}|tk:${tokenHashKey(cfg)}`;
   const cached = engines.get(id);
   if (cached) return cached;
   const injected = opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {};   // never pass an explicit undefined key
@@ -88,6 +89,7 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     kit: createChallengeAsync({ secret: env.secret }),
   };
   engines.set(id, engine);
+  warnIgnoredTokenHeader(cfg);
   return engine;
 }
 
@@ -211,6 +213,16 @@ export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): void {
   if (waitUntil !== noWait) e.queue.flush(waitUntil);
 }
 
+function hashRequestToken(eng: Engine, req: Request): Promise<string | null> | null {
+  const cfg = eng.env.tokenHash;
+  return cfg ? requestTokenHash((n) => req.headers.get(n), cfg, eng.env.ingestToken) : null;
+}
+
+async function stampTk(eng: Engine, req: Request, ev: WireEvent): Promise<void> {
+  const tk = await hashRequestToken(eng, req);
+  if (tk) ev.tk = tk;
+}
+
 /** 204 and a `sig: 1` row on the event batch — one request per flush at the analyst, not one per page view. */
 async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUntil: WaitUntil): Promise<Response> {
   const noContent = () => new Response(null, { status: 204, headers: { 'cache-control': 'no-store' } });
@@ -280,6 +292,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         ev.st = 403;
         ev.blk = v.reason;   // SDK-01: the analyst counts SDK blocks apart from the app's own 403s ('rule' when a rule decided)
         if (v.rule) ev.rl = v.rule;
+        if (eng.env.tokenHash) await stampTk(eng, req, ev);
         ship(eng, ev, waitUntil);
         const headers: Record<string, string> = {
           'content-type': 'text/plain', 'cache-control': 'no-store', 'x-block-reason': String(v.reason ?? ''), 'x-block-version': v.version ?? '',
@@ -363,6 +376,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
       const { url, path, ip } = describeRequest(eng, req, peer);
       return buildEvent(req, path, url.search, ip, vars?.sid ?? null, vars?.rid, newSession);
     }, null);
+    const tkP = ev ? hashRequestToken(eng, req) : null;
 
     await next();
 
@@ -377,18 +391,25 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const upgraded = wsRequest && c.res.status === 200 && !c.res.headers.has('content-type')
       && (bun ? guarded(() => bun.requestIP(req) === null, false) : true);
     const status = upgraded ? 101 : c.res.status;
-    const shipEvent = () => void guardedAsync(async () => {
-      if (!ev) return;
-      const cfg = eng.snap.config;
-      // a signalled row ships whatever sample and exclude say, like the 403 row it replaces
-      if (signalled) ev.chs = 1;
-      else if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
-      ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
-      ev.st = status;
-      ev.dur = Math.max(0, Date.now() - t0);
-      if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
-      ship(eng, ev, waitUntil);
-    }, undefined);
+    const shipEvent = () => {
+      const p = guardedAsync(async () => {
+        if (!ev) return;
+        const cfg = eng.snap.config;
+        // a signalled row ships whatever sample and exclude say, like the 403 row it replaces
+        if (signalled) ev.chs = 1;
+        else if ((cfg?.exclude || []).some((x) => (ev.p as string).startsWith(x)) || Math.random() >= (cfg?.sample ?? 1)) return;
+        ev.ts = t0;   // the request start: the timeline draws [ts, ts + dur]
+        ev.st = status;
+        ev.dur = Math.max(0, Date.now() - t0);
+        if (warnRule) ev.wrn = warnRule;   // §D3: the warn rule that let this request through
+        if (tkP) {
+          const tk = await tkP;
+          if (tk) ev.tk = tk;
+        }
+        ship(eng, ev, waitUntil);
+      }, undefined);
+      if (tkP) waitUntil(p);
+    };
     try {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
       // upgrade on Deno < 2.6, Bun's implicit Content-Type and, on Bun < 1.2.10, an empty body's
@@ -451,6 +472,7 @@ async function serve(eng: Engine, req: Request, ip: string, sid: string | null, 
   const ev = buildEvent(req, url.pathname, url.search, ip, sid);
   ev.st = 403;
   ev.blk = 'challenge';
+  if (eng.env.tokenHash) await stampTk(eng, req, ev);
   ship(eng, ev, waitUntil);
 
   const html = challengePage({ nonce: await eng.kit.nonce(ip, Date.now()), action, to: safeReturnTo(target) });
@@ -477,6 +499,7 @@ async function verify(eng: Engine, req: Request, ip: string, sid: string | null,
   const ev = buildEvent(req, url.pathname, '', ip, sid);
   ev.st = 200;
   ev.ch = 1;   // challenge passed (contract §A3 ingest field)
+  if (eng.env.tokenHash) await stampTk(eng, req, ev);
   ship(eng, ev, waitUntil);
   return new Response(null, {
     status: 302,
