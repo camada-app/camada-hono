@@ -1,7 +1,10 @@
 // Workers hand env vars per request on `c.env`, not on a process — so the engine is built from
 // whatever the first request carries, merged with the options the app passed in code.
 import type { Context } from 'hono';
-import { parseKey, parseTrustedProxyEnv, type SnapshotVersion, type TrustedProxyConfig } from '@camada/core';
+import {
+  parseKey, parseTrustedProxyEnv, resolveTokenHash,
+  type SnapshotVersion, type TokenHashConfig, type TokenHashOptions, type TrustedProxyConfig,
+} from '@camada/core';
 
 export interface ResolvedEnv {
   ingestToken: string;
@@ -10,9 +13,10 @@ export interface ResolvedEnv {
   ingestUrl: string;
   snapshotUrl: string;
   trustedProxy: TrustedProxyConfig | null;   // null = defer to server-delivered config
+  tokenHash: TokenHashConfig | null;
 }
 
-export interface CamadaHonoOptions {
+export interface CamadaHonoOptions extends TokenHashOptions {
   key?: string;
   ingestUrl?: string;
   snapshotUrl?: string;
@@ -78,5 +82,6 @@ export function resolveEnv(opts: CamadaHonoOptions, env: Record<string, string |
     // On Vercel the platform rewrites X-Forwarded-For, so its rightmost entry is the client (as @camada/next).
     trustedProxy: asProxy(opts.trustedProxy) ?? parseTrustedProxyEnv(env.CAMADA_TRUSTED_PROXY)
       ?? (hostVar('VERCEL', env) ? { mode: 'vercel' } : null),
+    tokenHash: resolveTokenHash(opts, env),
   };
 }
