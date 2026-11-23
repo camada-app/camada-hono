@@ -219,7 +219,7 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
-  ship(eng, beaconRow(parsed as Record<string, unknown>, ip, TAP_HONO), waitUntil);
+  ship(eng, beaconRow(parsed, ip, TAP_HONO), waitUntil);
   return noContent();
 }
 
