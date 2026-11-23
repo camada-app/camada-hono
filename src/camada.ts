@@ -10,7 +10,7 @@ import iife from '@camada/browser/iife-string';
 import {
   SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, logRateLimited, guardedAsync, onBodyDone, requestTokenHash,
   guarded, createChallengeAsync, challengePage, challengePageCsp, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
-  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
+  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO, tokenHashKey, warnIgnoredTokenHeader,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { withSetCookie, withRid } from '@camada/core/fetch';
@@ -75,7 +75,7 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
   }
   const snapshotVersion = opts.snapshotVersion ?? DEFAULT_SNAPSHOT_VERSION;
   const cfg = env.tokenHash;
-  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${snapshotVersion}|tk:${cfg ? cfg.header ?? '' : '-'}`;
+  const id = `${env.ingestToken}|${env.ingestUrl}|${env.snapshotUrl}|${snapshotVersion}|tk:${tokenHashKey(cfg)}`;
   const cached = engines.get(id);
   if (cached) return cached;
   const injected = opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {};   // never pass an explicit undefined key
@@ -89,7 +89,7 @@ function ensure(opts: CamadaHonoOptions, ctxEnv: Record<string, string | undefin
     kit: createChallengeAsync({ secret: env.secret }),
   };
   engines.set(id, engine);
-  if (cfg?.ignoredHeader) guarded(() => console.warn('[camada] token header ignored; using Authorization only'), undefined);
+  warnIgnoredTokenHeader(cfg);
   return engine;
 }
 
@@ -208,9 +208,9 @@ function buildEvent(
  *  with it. In a long-lived process (`noWait`) the queue's timer batches the rows — one POST /e per
  *  flush, not one per request (core's 7u3r rule). The one rule every row (wire event, beacon,
  *  track()) follows. */
-export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): Promise<void> | undefined {
+export function ship(e: Engine, ev: unknown, waitUntil: WaitUntil): void {
   e.queue.push(ev);
-  if (waitUntil !== noWait) return e.queue.flush(waitUntil);
+  if (waitUntil !== noWait) e.queue.flush(waitUntil);
 }
 
 function hashRequestToken(eng: Engine, req: Request): Promise<string | null> | null {
@@ -406,8 +406,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
           const tk = await tkP;
           if (tk) ev.tk = tk;
         }
-        const flushed = ship(eng, ev, waitUntil);
-        if (tkP) return flushed;
+        ship(eng, ev, waitUntil);
       }, undefined);
       if (tkP) waitUntil(p);
     };
