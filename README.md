@@ -212,9 +212,10 @@ the upload.
 Set `tokenHash: true` or `CAMADA_TOKEN_HASH=1` to send `tk` on request events with a usable
 credential. An explicit `tokenHash: false` wins over the env. `tk` is the first 32 hex characters
 of HMAC-SHA256, keyed with your ingest token, over `tok:` plus the credential. The credential is
-the part of `Authorization` after the scheme (e.g. the Bearer token). If you set
-`tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER`, that header's whole value wins when it gives
-a usable credential. The credential itself never leaves the process. A value shorter than 8
+the part of `Authorization` after the scheme (for example, the Bearer token), or the whole
+value when there is no scheme. Set `tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER` to use
+that header's whole value when it gives a usable credential. Otherwise, the SDK falls back
+to `Authorization`. The credential itself never leaves the process. A value shorter than 8
 characters or outside printable ASCII sends no `tk`.
 
 camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
