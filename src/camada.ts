@@ -219,7 +219,7 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
-  // Spread first: the ip, tap and request-row keys are the server's to say.
+  // Spread first so the server sets sig, ip, tap and rts. Strip browser-supplied keys reserved for request rows.
   const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO, rts: Date.now() };
   for (const k of REQUEST_ROW_KEYS) delete row[k];
   ship(eng, row, waitUntil);
