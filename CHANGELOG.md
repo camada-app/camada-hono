@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- The `/_cam/fp` beacon relay drops every `REQUEST_ROW_KEYS` field (`st`, `blk`, `uid`, …) from the browser body, as `@camada/node` and `@camada/next` already do, so a visitor cannot forge them (camada-all-peph).
+
 ## 0.4.0 (2026-10-26; follows 0.3.4)
 
 Built against `@camada/core` 0.6.0 (customer `matches` rules on the linear-time re2js engine inside a per-request regex budget; the beacon relay strips SDK-attested keys) and `@camada/browser` 0.4.0.

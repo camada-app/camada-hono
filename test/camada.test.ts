@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { Hono, type Context } from 'hono';
-import { CHALLENGE_COOKIE } from '@camada/core';
+import { CHALLENGE_COOKIE, REQUEST_ROW_KEYS } from '@camada/core';
 import iife from '@camada/browser/iife-string';
 import { camada, resetCamada, track, scriptTag, type CamadaHonoOptions } from '../src/index.js';
 
@@ -799,6 +799,19 @@ describe('first-party beacon', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-hono' });
     expect(events[0].st).toBeUndefined();
+  });
+
+  it('drops browser-supplied request-row keys (camada-all-peph)', async () => {
+    const a = await primed();
+    const body = {
+      ...Object.fromEntries(REQUEST_ROW_KEYS.map((k) => [k, 'forged'])),
+      rid: 'abc', tz: 'UTC', ip: '1.1.1.1', tap: 'proxy',
+    };
+    expect(REQUEST_ROW_KEYS.length).toBeGreaterThan(0);   // an empty import would pass vacuously
+    await postBeacon(a, JSON.stringify(body));
+    expect(events).toHaveLength(1);
+    for (const k of REQUEST_ROW_KEYS) expect(Object.hasOwn(events[0], k), k).toBe(false);
+    expect(events[0]).toMatchObject({ sig: 1, rid: 'abc', tz: 'UTC', ip: '9.9.9.9', tap: 'sdk-hono' });
   });
 
   it('stamps rts from the relay clock after the body spread (camada-all-wd3b)', async () => {
