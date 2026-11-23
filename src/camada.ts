@@ -8,9 +8,9 @@
 import type { Context, MiddlewareHandler, Next } from 'hono';
 import iife from '@camada/browser/iife-string';
 import {
-  SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
+  SnapshotClient, EventQueue, buildWireEvent, beaconRow, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
   guarded, createChallengeAsync, challengePage, challengePageCsp, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
-  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, REQUEST_ROW_KEYS, TAP_HONO,
+  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { withSetCookie, withRid } from '@camada/core/fetch';
@@ -219,10 +219,7 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
-  // Spread first so the server sets sig, ip, tap and rts. Strip browser-supplied keys reserved for request rows.
-  const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO, rts: Date.now() };
-  for (const k of REQUEST_ROW_KEYS) delete row[k];
-  ship(eng, row, waitUntil);
+  ship(eng, beaconRow(parsed, ip, TAP_HONO), waitUntil);
   return noContent();
 }
 
