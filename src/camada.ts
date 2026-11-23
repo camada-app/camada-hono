@@ -10,7 +10,7 @@ import iife from '@camada/browser/iife-string';
 import {
   SnapshotClient, EventQueue, buildWireEvent, resolveClientIp, logRateLimited, guardedAsync, onBodyDone,
   guarded, createChallengeAsync, challengePage, challengePageCsp, challengeCookie, safeReturnTo, wantsHtml, parseFormBody, readBodyCapped,
-  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, TAP_HONO,
+  CHALLENGE_COOKIE, DEFAULT_SNAPSHOT_VERSION, REQUEST_ROW_KEYS, TAP_HONO,
   type AsyncChallengeKit, type TrustedProxyConfig, type WireEvent,
 } from '@camada/core';
 import { withSetCookie, withRid } from '@camada/core/fetch';
@@ -219,8 +219,10 @@ async function relayBeacon(eng: Engine, req: Request, ip: string | null, waitUnt
   let parsed: unknown;
   try { parsed = JSON.parse(body); } catch { return noContent(); }   // not a beacon: drop it, never ship junk
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return noContent();
-  // Spread first: the ip and the tap are the server's to say, whatever the body claimed.
-  ship(eng, { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO, rts: Date.now() }, waitUntil);
+  // Spread first: the ip, tap and request-row keys are the server's to say.
+  const row: Record<string, unknown> = { ...(parsed as Record<string, unknown>), sig: 1, ip, tap: TAP_HONO, rts: Date.now() };
+  for (const k of REQUEST_ROW_KEYS) delete row[k];
+  ship(eng, row, waitUntil);
   return noContent();
 }
 
