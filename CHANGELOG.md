@@ -1,10 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0 (2026-11-24; follows 0.4.0)
+
+Built against `@camada/core` 0.7.0 and `@camada/browser` 0.5.0.
+
+### Added
+
+- Opt-in credential hash, off by default. With option `tokenHash: true` or env `CAMADA_TOKEN_HASH=1`, request events that carry a usable credential ship `tk`, a keyed HMAC of the credential computed in process. `tokenHeader` (or `CAMADA_TOKEN_HEADER`) names a header such as `x-api-key` to use in place of `Authorization`. The credential itself never leaves the process. See the README, "Credential hash". (camada-all-tvkd)
 
 ### Fixed
 
-- The `/_cam/fp` beacon relay drops every `REQUEST_ROW_KEYS` field (`st`, `blk`, `uid`, …) from the browser body, as `@camada/node` and `@camada/next` already do, so a visitor cannot forge them (camada-all-peph).
+- The `/_cam/fp` beacon relay drops every `REQUEST_ROW_KEYS` field (`st`, `blk`, `uid`, …) from the browser body, as `@camada/node` and `@camada/next` already do, so a visitor cannot forge them (camada-all-peph). It now uses core's `beaconRow`, so `tk`, `bf` and `upf` are dropped too (camada-all-c0qo).
+- Without a `waitUntil`, the middleware settles the `tk` hash before the request continues, and `track()` and request rows still being built are tracked so shutdown waits for them. Rows are no longer lost when the function freezes or stops. (camada-all-vvvp)
 
 ## 0.4.0 (2026-10-26; follows 0.3.4)
 
