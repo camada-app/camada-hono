@@ -409,10 +409,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         }
         ship(eng, ev, waitUntil);
       }, undefined);
-      if (tkP) {
-        eng.queue.addPending(p);
-        waitUntil(p);
-      }
+      if (tkP) waitUntil(eng.queue.addPending(p));
     };
     try {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101
