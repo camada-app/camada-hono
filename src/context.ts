@@ -37,7 +37,7 @@ export function track(c: Context, event: string, data?: { user?: string }): Prom
     const uid = data?.user ? await hashUserId(data.user, vars.eng.env.ingestToken) : null;
     ship(vars.eng, { tap: TAP_HONO, et: event, uid, rid: vars.rid, sid: vars.sid, ip: vars.ip, ts: Date.now() }, vars.waitUntil);
   }, undefined);
-  vars.waitUntil(p);   // the isolate may freeze right after the response: hold it open for the flush
+  vars.waitUntil(vars.eng.queue.addPending(p));   // the isolate may freeze right after the response: hold it open for the flush
   return p;
 }
 
