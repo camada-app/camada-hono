@@ -379,6 +379,7 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
     const tkP = ev ? hashRequestToken(eng, req) : null;
 
     await next();
+    if (waitUntil === flushNow && tkP) await tkP;   // settle before the function can freeze
 
     // The handler has answered, so this tap ships the real status — unlike @camada/next's
     // middleware position, which can only report pre-response. A server-sent-events body ships
@@ -408,7 +409,10 @@ export function camada(opts: CamadaHonoOptions = {}): MiddlewareHandler {
         }
         ship(eng, ev, waitUntil);
       }, undefined);
-      if (tkP) waitUntil(p);
+      if (tkP) {
+        eng.queue.addPending(p);
+        waitUntil(p);
+      }
     };
     try {
       // onBodyDone hands back c.res itself unless it wrapped an SSE body: any copy loses a 101

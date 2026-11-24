@@ -55,7 +55,7 @@ function harness(options: CamadaHonoOptions = {}) {
     return res;
   }
 
-  return { events, request, send };
+  return { app, events, request, send };
 }
 
 afterEach(() => { vi.restoreAllMocks(); resetCamada(); });
@@ -167,6 +167,26 @@ describe('credential hash on shipped rows', () => {
     }
     await Promise.all(waits);
     expect(events).toEqual([expect.objectContaining({ st: 200, tk: TK })]);
+  });
+
+  it('starts the hashed POST before returning on Lambda without waitUntil', async () => {
+    const { app, events } = harness({ tokenHash: true });
+    const sign = crypto.subtle.sign.bind(crypto.subtle);
+    let resume!: () => void;
+    const pending = new Promise<void>((resolve) => { resume = resolve; });
+    const signing = vi.spyOn(crypto.subtle, 'sign').mockImplementationOnce(async (...args) => {
+      await pending;
+      return sign(...args);
+    });
+    const responding = app.request('/', { headers: AUTH }, { ...ENV, AWS_LAMBDA_FUNCTION_NAME: 'test-function' });
+    try {
+      await vi.waitFor(() => expect(signing).toHaveBeenCalledOnce());
+      resume();
+      expect((await responding).status).toBe(200);
+      expect(events).toEqual([expect.objectContaining({ st: 200, tk: TK })]);
+    } finally {
+      resume();
+    }
   });
 
   it('relays a beacon without forged tk, bf or upf', async () => {
