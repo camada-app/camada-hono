@@ -215,8 +215,7 @@ of HMAC-SHA256, keyed with your ingest token, over `tok:` plus the credential. T
 the part of `Authorization` after the scheme (for example, the Bearer token), or the whole
 value when there is no scheme. Set `tokenHeader: 'x-api-key'` or `CAMADA_TOKEN_HEADER` to use
 that header's whole value when it gives a usable credential. Otherwise, the SDK falls back
-to `Authorization`. The credential itself never leaves the process. A value shorter than 8
-characters or outside printable ASCII sends no `tk`.
+to `Authorization`. The credential itself never leaves the process. The credential, after any scheme, must contain at least 8 printable ASCII characters; otherwise no `tk` is sent.
 
 camada uses `tk` to spot one credential replayed from many clients. Turn it on when your
 credentials are random tokens or API keys. Leave it off for human passwords over Basic auth.
